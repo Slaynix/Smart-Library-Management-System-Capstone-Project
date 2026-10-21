@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">DATA STRUCTURE</p><h1>Waiting Queue</h1><p class="subtitle">FIFO queue for unavailable books</p></div><span class="badge">FIFO</span></div>
+{% for item in queue_data %}
+<section class="section"><div class="section-title"><div><h2>{{ item.book.title }}</h2><span class="muted">{{ item.size }} waiting</span></div></div>
+<div class="queue-list">{% for row in item.rows %}<div class="queue-row"><div class="queue-number">{{ loop.index }}</div><div><b>{{ row.student.name }}</b><span class="muted">{{ row.created_at.strftime('%d %b %Y %H:%M') }}</span></div>
+<form method="POST" action="{{ url_for('remove_from_queue', waitlist_id=row.waitlist_id) }}"><button class="btn danger small">Remove</button></form></div>{% endfor %}</div></section>
+{% else %}<section class="section empty">No waiting students.</section>{% endfor %}
+{% endblock %}

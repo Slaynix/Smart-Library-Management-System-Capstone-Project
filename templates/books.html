@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">DBMS CRUD MODULE</p><h1>Book Management</h1></div></div>
+<section class="section"><form method="GET" class="toolbar">
+<input name="search" value="{{ search }}" placeholder="Search title, author or ISBN">
+<button class="btn">Search</button><a class="btn secondary" href="{{ url_for('books') }}">Reset</a>
+</form></section>
+<section class="section"><h2>Add New Book</h2>
+<form method="POST" action="{{ url_for('add_book') }}" class="form-grid">
+<input name="title" placeholder="Book title" required><input name="author" placeholder="Author" required>
+<input name="isbn" placeholder="ISBN" required><input name="category" placeholder="Category" required>
+<input name="copies" type="number" min="1" placeholder="Total copies" required><button class="btn">Add Book</button>
+</form></section>
+<section class="section"><div class="section-title"><h2>Books</h2><span class="muted">{{ books|length }} result(s)</span></div>
+<div class="table-wrap"><table><thead><tr><th>ID</th><th>Title</th><th>Author</th><th>ISBN</th><th>Category</th><th>Total</th><th>Available</th><th>Actions</th></tr></thead><tbody>
+{% for book in books %}<tr><td>#{{ book.book_id }}</td><td><b>{{ book.title }}</b></td><td>{{ book.author }}</td><td>{{ book.isbn }}</td><td>{{ book.category }}</td><td>{{ book.total_copies }}</td><td>{{ book.available_copies }}</td><td class="actions">
+<a class="btn small" href="{{ url_for('edit_book', book_id=book.book_id) }}">Edit</a>
+<form method="POST" action="{{ url_for('delete_book', book_id=book.book_id) }}" onsubmit="return confirm('Delete this book?');"><button class="btn danger small">Delete</button></form>
+</td></tr>
+{% else %}<tr><td colspan="8" class="empty">No books found.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

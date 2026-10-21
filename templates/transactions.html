@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">DBMS TRANSACTION HISTORY</p><h1>Transactions</h1></div></div>
+<section class="section"><div class="table-wrap"><table><thead><tr><th>ID</th><th>Book</th><th>Student</th><th>Issue</th><th>Return</th><th>Status</th><th>Fine</th><th>Action</th></tr></thead><tbody>
+{% for t in transactions %}<tr><td>#{{ t.transaction_id }}</td><td>{{ t.book.title }}</td><td>{{ t.student.name }}</td><td>{{ t.issue_date }}</td><td>{{ t.return_date or "-" }}</td><td><span class="badge">{{ t.status }}</span></td><td>₹{{ "%.2f"|format(t.fine) }}</td><td>
+{% if t.status == "Issued" %}<form method="POST" action="{{ url_for('return_book', transaction_id=t.transaction_id) }}"><button class="btn small">Return</button></form>{% else %}<span class="muted">Completed</span>{% endif %}
+</td></tr>
+{% else %}<tr><td colspan="8" class="empty">No transactions yet.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

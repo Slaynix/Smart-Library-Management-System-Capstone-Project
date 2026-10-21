@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">CRUD UPDATE</p><h1>Edit Book</h1></div></div>
+<section class="section narrow"><form method="POST" class="form-grid">
+<input name="title" value="{{ book.title }}" required><input name="author" value="{{ book.author }}" required>
+<input name="isbn" value="{{ book.isbn }}" required><input name="category" value="{{ book.category }}" required>
+<input name="copies" type="number" min="{{ book.total_copies - book.available_copies }}" value="{{ book.total_copies }}" required>
+<button class="btn">Save Changes</button><a class="btn secondary" href="{{ url_for('books') }}">Cancel</a>
+</form><p class="hint">Issued copies cannot be reduced below the number currently on loan.</p></section>
+{% endblock %}
