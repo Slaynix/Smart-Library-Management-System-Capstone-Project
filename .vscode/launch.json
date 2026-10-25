@@ -2,14 +2,31 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "SmartLib Flask",
+      "name": "SmartLib: Run Flask Server (app.py)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/app.py",
       "console": "integratedTerminal",
-      "env": {
-        "SECRET_KEY": "smartlib-local-secret"
-      }
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "SmartLib: Seed Database (seed_data.py)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/seed_data.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
+    },
+    {
+      "name": "SmartLib: Run Tests (test_smartlib.py)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/test_smartlib.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": true
     }
   ]
 }

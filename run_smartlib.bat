@@ -3,16 +3,24 @@ title SmartLib - Library Management System
 cd /d "%~dp0"
 
 echo ============================================================
-echo   SMARTLIB - Starting Server...
-echo   Open http://127.0.0.1:5000 or http://localhost:5000
+echo   SMARTLIB - Library Management System
+echo   Server URL: http://127.0.0.1:5000
 echo ============================================================
 echo.
 
-python app.py
-if errorlevel 1 (
-    echo.
-    echo [!] Trying py launcher...
-    py app.py
+if exist "venv\Scripts\python.exe" (
+    echo [*] Using virtual environment Python...
+    venv\Scripts\python.exe app.py
+) else if exist ".venv\Scripts\python.exe" (
+    echo [*] Using virtual environment Python...
+    .venv\Scripts\python.exe app.py
+) else (
+    echo [*] Using system Python...
+    python app.py
+    if errorlevel 1 (
+        echo [!] Trying py launcher...
+        py app.py
+    )
 )
 
 pause

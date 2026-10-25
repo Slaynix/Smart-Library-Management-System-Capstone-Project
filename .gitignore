@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -19,7 +19,6 @@ instance/
 *.sqlite3
 
 # IDE
-.vscode/
 .idea/
 *.swp
 
