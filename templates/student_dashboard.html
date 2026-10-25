@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title_suffix %} — Student Dashboard{% endblock %}
+{% block content %}
+<div class="page-header">
+<div>
+<p class="eyebrow">STUDENT PORTAL</p>
+<h1>Welcome, {{ student.name }}</h1>
+<p class="subtitle">{{ student.department }}</p>
+</div>
+<a class="btn secondary" href="{{ url_for('student_catalogue') }}">Browse Catalogue</a>
+</div>
+
+<div class="stats" style="grid-template-columns: repeat(3, 1fr);">
+<div class="card">
+<span>Email</span>
+<strong style="font-size:16px;word-break:break-all;">{{ student.email }}</strong>
+</div>
+<div class="card">
+<span>Books Currently Issued</span>
+<strong>{{ issued_books|length }}</strong>
+</div>
+<div class="card">
+<span>Total Fines</span>
+<strong>₹{{ "%.2f"|format(total_fines) }}</strong>
+</div>
+</div>
+
+<section class="section">
+<div class="section-title">
+<h2>Currently Issued Books</h2>
+<span class="badge">{{ issued_books|length }} active</span>
+</div>
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Book</th><th>Author</th><th>Issue Date</th><th>Status</th>
+</tr></thead>
+<tbody>
+{% for t in issued_books %}
+<tr>
+<td><b>{{ t.book.title }}</b></td>
+<td>{{ t.book.author }}</td>
+<td>{{ t.issue_date }}</td>
+<td><span class="badge">{{ t.status }}</span></td>
+</tr>
+{% else %}
+<tr><td colspan="4" class="empty">No books currently issued. Visit the library to borrow books!</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
+
+<section class="section">
+<div class="section-title">
+<h2>Borrowing History</h2>
+<span class="muted">{{ history|length }} transaction(s)</span>
+</div>
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Book</th><th>Issue Date</th><th>Return Date</th><th>Status</th><th>Fine</th>
+</tr></thead>
+<tbody>
+{% for t in history %}
+<tr>
+<td><b>{{ t.book.title }}</b></td>
+<td>{{ t.issue_date }}</td>
+<td>{{ t.return_date or "-" }}</td>
+<td><span class="badge">{{ t.status }}</span></td>
+<td>₹{{ "%.2f"|format(t.fine) }}</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="empty">No borrowing history yet.</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
+{% endblock %}

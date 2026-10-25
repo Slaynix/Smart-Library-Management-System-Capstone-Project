@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title_suffix %} — Book Catalogue{% endblock %}
+{% block content %}
+<div class="page-header">
+<div>
+<p class="eyebrow">STUDENT PORTAL</p>
+<h1>Book Catalogue</h1>
+<p class="subtitle">Browse all available books in the library</p>
+</div>
+<a class="btn secondary" href="{{ url_for('student_dashboard') }}">← My Dashboard</a>
+</div>
+
+<section class="section">
+<form method="GET" class="toolbar">
+<input name="search" value="{{ search }}" placeholder="Search by title, author or ISBN">
+<button class="btn">Search</button>
+<a class="btn secondary" href="{{ url_for('student_catalogue') }}">Reset</a>
+</form>
+</section>
+
+<section class="section">
+<div class="section-title">
+<h2>Books</h2>
+<span class="muted">{{ books|length }} result(s)</span>
+</div>
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Title</th><th>Author</th><th>ISBN</th><th>Category</th><th>Available</th>
+</tr></thead>
+<tbody>
+{% for book in books %}
+<tr>
+<td><b>{{ book.title }}</b></td>
+<td>{{ book.author }}</td>
+<td>{{ book.isbn }}</td>
+<td>{{ book.category }}</td>
+<td>
+{% if book.available_copies > 0 %}
+<span class="badge">{{ book.available_copies }} available</span>
+{% else %}
+<span class="badge" style="background:#fee2e2;color:#991b1b;">Unavailable</span>
+{% endif %}
+</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="empty">No books found.</td></tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
+{% endblock %}

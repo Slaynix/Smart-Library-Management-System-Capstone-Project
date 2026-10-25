@@ -1,0 +1,36 @@
+﻿# render.yaml — SmartLib deployment on Render.com
+# Push this file to GitHub, then connect repo at https://dashboard.render.com
+
+services:
+  - type: web
+    name: smartlib
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:application --workers 2 --bind 0.0.0.0:$PORT --timeout 120
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true          # Render auto-generates a secure value
+      - key: USE_FIREBASE
+        value: "true"
+      - key: FIREBASE_PROJECT_ID
+        value: smart-dfccb
+      - key: FIREBASE_API_KEY
+        value: AIzaSyDJyMc9KRTEs0GilAu5eVVKHy_GVpbqwBU
+      - key: FIREBASE_AUTH_DOMAIN
+        value: smart-dfccb.firebaseapp.com
+      - key: FIREBASE_STORAGE_BUCKET
+        value: smart-dfccb.firebasestorage.app
+      - key: FIREBASE_MESSAGING_SENDER_ID
+        value: "140304053613"
+      - key: FIREBASE_APP_ID
+        value: "1:140304053613:web:b738db8d8591f4624a5664"
+      - key: GOOGLE_ADMIN_EMAILS
+        value: sanskargirase787@gmail.com
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false                  # Set this manually in Render dashboard
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: DATABASE_URL
+        value: "sqlite:///library.db" # Replace with Render PostgreSQL URL if needed

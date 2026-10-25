@@ -1,10 +1,21 @@
-# SmartLib — Google Sign-In Setup
+# SmartLib — Google Sign-In & Role-Based Access Setup
 
-Google sign-in has been added alongside the existing username/password login. It uses Google's OpenID Connect authorization-code flow through Authlib. It does **not** grant access to every Google account: the app only accepts verified email addresses listed in `GOOGLE_ALLOWED_EMAILS`, because SmartLib is an administration portal.
+SmartLib supports two authentication paths — both using Google OpenID Connect via Authlib, plus a traditional username/password login for administrators.
+
+## Roles
+
+| Role | How to get access | Landing page |
+|------|-------------------|--------------|
+| **Admin** | Email listed in `GOOGLE_ADMIN_EMAILS`, or local `ADMIN_USERNAME`/`ADMIN_PASSWORD` | `/` (admin dashboard) |
+| **Student** | Google login with an email matching a record in the `students` table | `/student/dashboard` |
+
+Students **must** be registered in the database by an administrator before they can log in. Arbitrary Google accounts are rejected.
+
+---
 
 ## 1. Install and prepare the project
 
-1. Extract the ZIP and open the project folder in VS Code.
+1. Extract the project and open the folder in VS Code.
 2. Copy `.env.example` to a new file named `.env` in the project root.
 3. In the VS Code terminal, install dependencies:
 
@@ -20,59 +31,60 @@ Google sign-in has been added alongside the existing username/password login. It
    py -c "import secrets; print(secrets.token_hex(32))"
    ```
 
-5. Set a strong `ADMIN_PASSWORD` in `.env`. If an existing `library.db` already has an admin user, changing `.env` will **not** automatically change that user's stored password; change it through an explicit password-reset/database procedure before deployment.
+5. Set a strong `ADMIN_PASSWORD` in `.env` (required to seed the local admin).
 
 ## 2. Create Google OAuth credentials
 
-1. Open the [Google Cloud Console](https://console.cloud.google.com/). Create/select a project.
-2. Configure the OAuth consent screen / Google Auth Platform branding and audience as required for your account. During testing, add the Google account you will use as a test user if the app is in Testing mode.
-3. Open **APIs & Services → Credentials** (or the Credentials page in Google Auth Platform) and create an **OAuth client ID** of type **Web application**.
-4. Add this **Authorized redirect URI** exactly:
+1. Open the [Google Cloud Console](https://console.cloud.google.com/). Create or select a project.
+2. Configure the OAuth consent screen. During testing, add your Google account as a test user.
+3. Open **APIs & Services → Credentials** and create an **OAuth client ID** of type **Web application**.
+4. Add these **Authorized redirect URIs**:
 
-   ```text
-   http://127.0.0.1:5000/auth/google/callback
    ```
-
-   If you also open SmartLib at `http://localhost:5000`, add this second URI too:
-
-   ```text
+   http://127.0.0.1:5000/auth/google/callback
    http://localhost:5000/auth/google/callback
    ```
 
-   The redirect URI must match the host and port you use in your browser. Google rejects mismatched redirect URIs.
+5. Copy the OAuth client ID and client secret into `.env`:
 
-5. Copy the generated OAuth client ID and client secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Keep the client secret private; do not paste it into source code or commit `.env`.
+   ```dotenv
+   GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=your-google-client-secret
+   ```
 
-## 3. Restrict which Google accounts can sign in
+## 3. Configure authorized administrators
 
-In `.env`, set the verified Google email address(es) allowed to administer this SmartLib instance:
-
-```dotenv
-GOOGLE_ALLOWED_EMAILS=your.email@gmail.com
-```
-
-For more than one authorized administrator, separate addresses with commas:
+In `.env`, list the Google email addresses that should receive **admin** access:
 
 ```dotenv
-GOOGLE_ALLOWED_EMAILS=owner@gmail.com,second.admin@gmail.com
+GOOGLE_ADMIN_EMAILS=owner@gmail.com,second.admin@gmail.com
 ```
 
-Without this allowlist, Google sign-in remains locked. Use only email addresses you control or have intentionally authorized.
+> **Migration note:** The legacy variable `GOOGLE_ALLOWED_EMAILS` is still supported as a fallback. `GOOGLE_ADMIN_EMAILS` takes precedence when set.
 
-## 4. Start and test
+## 4. Register students
+
+Students log in with Google. Their Google email **must** match a record in the `students` table (added by an admin via the Students page). No allowlist entry is needed for students — email matching is automatic.
+
+## 5. Start and test
 
 ```powershell
 python app.py
 ```
 
-Open `http://127.0.0.1:5000/login` and select **Continue with Google**. Confirm that the successful login redirects to the existing SmartLib dashboard and that books, students, transactions, queue, and reports still work. The original username/password login remains available.
+Open `http://127.0.0.1:5000/login`:
 
-## 5. Before deployment
+- **Administrators** can use the password form or "Continue with Google".
+- **Students** click "Continue with Google" — they are redirected to their student dashboard.
 
-- Deploy only behind HTTPS, set `SESSION_COOKIE_SECURE=true`, and register the production HTTPS callback URI with Google.
-- Set a long, random, persistent `SECRET_KEY` in the host's secret manager/environment. Never use a random per-start fallback in production.
-- Keep `GOOGLE_CLIENT_SECRET`, `SECRET_KEY`, and the production database credentials out of Git and public files.
-- Change any legacy default admin password. The login page no longer displays demo credentials.
-- Keep `GOOGLE_ALLOWED_EMAILS` limited to approved administrators. Google sign-in is an authentication method, not a replacement for authorization rules.
+## 6. Before deployment
 
-For reference, see [Google OpenID Connect documentation](https://developers.google.com/identity/openid-connect/openid-connect) and [Authlib's Flask integration documentation](https://docs.authlib.org/en/latest/oauth2/client/web/flask.html).
+- Deploy only behind HTTPS and set `SESSION_COOKIE_SECURE=true`.
+- Register the production HTTPS callback URI with Google.
+- Set a long, random, persistent `SECRET_KEY`.
+- Keep all secrets out of Git and public files.
+- Change any legacy default admin password.
+
+For reference:
+- [Google OpenID Connect documentation](https://developers.google.com/identity/openid-connect/openid-connect)
+- [Authlib Flask integration](https://docs.authlib.org/en/latest/oauth2/client/web/flask.html)

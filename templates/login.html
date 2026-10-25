@@ -1,20 +1,83 @@
 {% extends "base.html" %}
+{% block title_suffix %} — Login{% endblock %}
 {% block content %}
 <div class="auth-card">
 <div class="brand-mark">SL</div>
 <h1>SmartLib Login</h1>
-<p class="subtitle">Library administration portal</p>
-<form method="POST" class="stack-form">
-<input name="username" autocomplete="username" placeholder="Username" required>
-<input type="password" name="password" autocomplete="current-password" placeholder="Password" required>
-<button class="btn" type="submit">Sign In with Password</button>
-</form>
-<div class="auth-divider"><span>OR</span></div>
+<p class="subtitle">Library Management System</p>
+
 {% if google_login_enabled %}
-<a class="btn google-btn" href="{{ url_for('google_login') }}"><span class="google-g" aria-hidden="true">G</span> Continue with Google</a>
+<button class="btn google-btn" id="google-login-btn" type="button">
+<span class="google-g" aria-hidden="true">G</span>
+Continue with Google
+</button>
+<p class="hint" style="text-align:center;">Students and administrators can sign in with Google.</p>
+<div class="auth-divider"><span>OR</span></div>
 {% else %}
 <div class="google-unavailable">Google sign-in is not configured yet. See <strong>GOOGLE_LOGIN_SETUP.md</strong>.</div>
+<div class="auth-divider"><span>ADMIN LOGIN</span></div>
 {% endif %}
-<p class="hint">For safety, only Google accounts listed in the administrator's <code>GOOGLE_ALLOWED_EMAILS</code> setting can access this admin portal.</p>
+
+<p class="subtitle" style="margin-bottom:8px;">Administrator Login</p>
+<form method="POST" class="stack-form" id="admin-login-form">
+<input name="username" autocomplete="username" placeholder="Admin Username" required id="admin-username">
+<input type="password" name="password" autocomplete="current-password" placeholder="Password" required id="admin-password">
+<button class="btn" type="submit" id="admin-login-submit">Sign In as Administrator</button>
+</form>
+
+<p class="hint">Students: use <strong>Continue with Google</strong> above. Your email must be registered by the library administrator.</p>
 </div>
+
+{% if firebase_config and firebase_config.apiKey %}
+<!-- Firebase Web SDK for Google Sign-In Popup -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script>
+  const firebaseConfig = {{ firebase_config|tojson }};
+  if (!firebase.apps.length) {
+    firebase.initializeApp(firebaseConfig);
+  }
+
+  const googleBtn = document.getElementById('google-login-btn');
+  if (googleBtn) {
+    googleBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      const origHtml = googleBtn.innerHTML;
+      googleBtn.disabled = true;
+      googleBtn.innerHTML = '<span>Connecting to Google...</span>';
+
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.addScope('email');
+      provider.addScope('profile');
+      provider.setCustomParameters({ prompt: 'select_account' });
+
+      firebase.auth().signInWithPopup(provider)
+        .then(async function(result) {
+          googleBtn.innerHTML = '<span>Verifying account...</span>';
+          const idToken = await result.user.getIdToken();
+          const res = await fetch("{{ url_for('firebase_login_api') }}", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id_token: idToken })
+          });
+          const data = await res.json();
+          if (data.redirect) {
+            window.location.href = data.redirect;
+          } else {
+            alert(data.error || 'Login failed.');
+            googleBtn.disabled = false;
+            googleBtn.innerHTML = origHtml;
+          }
+        })
+        .catch(function(error) {
+          googleBtn.disabled = false;
+          googleBtn.innerHTML = origHtml;
+          if (error.code !== 'auth/popup-closed-by-user' && error.code !== 'auth/cancelled-popup-request') {
+            alert('Google Sign-In Error: ' + error.message);
+          }
+        });
+    });
+  }
+</script>
+{% endif %}
 {% endblock %}

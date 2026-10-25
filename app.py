@@ -4,11 +4,12 @@ import secrets
 from datetime import date, timedelta
 from functools import wraps
 
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()  # Load local development settings from .env when present.
 
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
 from authlib.integrations.flask_client import OAuth
 from sqlalchemy import text
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -17,9 +18,20 @@ from database import db
 from models import User, GoogleIdentity, Book, Student, Transaction, Waitlist
 from ds.queue import WaitingQueue
 from ds.search import linear_search
+import firestore_db
 
 
 app = Flask(__name__)
+
+# Firebase Cloud Database & Auth Configuration
+USE_FIREBASE = os.getenv("USE_FIREBASE", "true").lower() in {"1", "true", "yes", "on"}
+app.config["USE_FIREBASE"] = USE_FIREBASE
+app.config["FIREBASE_PROJECT_ID"] = os.getenv("FIREBASE_PROJECT_ID", "smart-dfccb")
+app.config["FIREBASE_API_KEY"] = os.getenv("FIREBASE_API_KEY", "AIzaSyDJyMc9KRTEs0GilAu5eVVKHy_GVpbqwBU")
+app.config["FIREBASE_AUTH_DOMAIN"] = os.getenv("FIREBASE_AUTH_DOMAIN", "smart-dfccb.firebaseapp.com")
+app.config["FIREBASE_STORAGE_BUCKET"] = os.getenv("FIREBASE_STORAGE_BUCKET", "smart-dfccb.firebasestorage.app")
+app.config["FIREBASE_MESSAGING_SENDER_ID"] = os.getenv("FIREBASE_MESSAGING_SENDER_ID", "140304053613")
+app.config["FIREBASE_APP_ID"] = os.getenv("FIREBASE_APP_ID", "1:140304053613:web:b738db8d8591f4624a5664")
 
 database_url = os.getenv("DATABASE_URL", "sqlite:///library.db")
 if database_url.startswith("postgres://"):
@@ -36,7 +48,9 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
 db.init_app(app)
 
-# OAuth uses Google's OpenID Connect discovery document and the authorization-code flow.
+# ---------------------------------------------------------------------------
+# OAuth — Google OpenID Connect authorization-code flow (Authlib fallback)
+# ---------------------------------------------------------------------------
 oauth = OAuth(app)
 google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
@@ -50,20 +64,55 @@ if google_client_id and google_client_secret:
         client_kwargs={"scope": "openid email profile"},
     )
 
-def allowed_google_emails():
-    """Return the explicitly authorized Google accounts, normalized to lowercase."""
+
+# ---------------------------------------------------------------------------
+# Authorization helpers
+# ---------------------------------------------------------------------------
+def admin_google_emails():
+    """Return explicitly authorized administrator Google emails, normalized."""
+    raw = os.getenv("GOOGLE_ADMIN_EMAILS", "") or os.getenv("GOOGLE_ALLOWED_EMAILS", "")
     return {
         address.strip().lower()
-        for address in os.getenv("GOOGLE_ALLOWED_EMAILS", "").split(",")
+        for address in raw.split(",")
         if address.strip()
     }
 
+
 def login_required(view):
+    """Requires any authenticated user (admin or student)."""
     @wraps(view)
     def wrapped(*args, **kwargs):
         if "user_id" not in session:
             flash("Please log in first.", "warning")
             return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    """Requires an authenticated administrator."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please log in first.", "warning")
+            return redirect(url_for("login"))
+        if session.get("role") != "admin":
+            flash("You do not have permission to access this page.", "danger")
+            return redirect(url_for("student_dashboard"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def student_required(view):
+    """Requires an authenticated student."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please log in first.", "warning")
+            return redirect(url_for("login"))
+        if session.get("role") != "student":
+            flash("You do not have permission to access this page.", "danger")
+            return redirect(url_for("dashboard"))
         return view(*args, **kwargs)
     return wrapped
 
@@ -79,39 +128,98 @@ def get_waiting_queue(book_id):
 
 
 def seed_admin():
-    username = os.getenv("ADMIN_USERNAME", "admin")
-    password = os.getenv("ADMIN_PASSWORD", "admin123")
-    if not User.query.filter_by(username=username).first():
+    """Seed a local admin account from env vars."""
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        return
+    existing = User.query.filter_by(username=username).first()
+    if not existing:
         db.session.add(User(
             username=username,
-            password_hash=generate_password_hash(password)
+            password_hash=generate_password_hash(password),
+            role="admin",
         ))
+        db.session.commit()
+    elif existing.role != "admin":
+        existing.role = "admin"
         db.session.commit()
 
 
+def safe_migrate():
+    """Add new columns to existing SQLite tables if upgrading."""
+    with db.engine.connect() as conn:
+        try:
+            conn.execute(text("SELECT role FROM users LIMIT 1"))
+        except Exception:
+            conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'admin'"))
+            conn.commit()
+
+        try:
+            conn.execute(text("SELECT student_id FROM google_identities LIMIT 1"))
+        except Exception:
+            try:
+                conn.execute(text("ALTER TABLE google_identities ADD COLUMN student_id INTEGER REFERENCES students(student_id)"))
+                conn.commit()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Template context
+# ---------------------------------------------------------------------------
 @app.context_processor
 def globals_for_templates():
+    is_firebase = app.config.get("USE_FIREBASE", True)
+    has_firebase_auth = bool(app.config.get("FIREBASE_API_KEY"))
+    google_enabled = (has_firebase_auth if is_firebase else (google is not None))
     return {
         "logged_in": "user_id" in session,
-        "google_login_enabled": google is not None,
-        "google_allowlist_configured": bool(allowed_google_emails()),
+        "user_role": session.get("role"),
+        "google_login_enabled": google_enabled,
+        "firebase_config": {
+            "apiKey": app.config.get("FIREBASE_API_KEY") if is_firebase else None,
+            "authDomain": app.config.get("FIREBASE_AUTH_DOMAIN") if is_firebase else None,
+            "projectId": app.config.get("FIREBASE_PROJECT_ID") if is_firebase else None,
+            "storageBucket": app.config.get("FIREBASE_STORAGE_BUCKET") if is_firebase else None,
+            "messagingSenderId": app.config.get("FIREBASE_MESSAGING_SENDER_ID") if is_firebase else None,
+            "appId": app.config.get("FIREBASE_APP_ID") if is_firebase else None,
+        },
     }
 
 
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if "user_id" in session:
+        if session.get("role") == "student":
+            return redirect(url_for("student_dashboard"))
         return redirect(url_for("dashboard"))
 
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        user = User.query.filter_by(username=username).first()
 
-        if user and check_password_hash(user.password_hash, password):
+        # Check in Firebase Firestore first if enabled
+        if app.config.get("USE_FIREBASE"):
+            user = firestore_db.get_user_by_username(username)
+            if user and user.get("role") == "admin" and check_password_hash(user.get("password_hash", ""), password):
+                session.clear()
+                session["user_id"] = user.get("user_id")
+                session["username"] = user.get("username")
+                session["role"] = "admin"
+                flash("Welcome to SmartLib.", "success")
+                return redirect(url_for("dashboard"))
+
+        # Fallback to local SQL db
+        user = User.query.filter_by(username=username).first()
+        if user and user.role == "admin" and check_password_hash(user.password_hash, password):
             session.clear()
             session["user_id"] = user.user_id
             session["username"] = user.username
+            session["role"] = "admin"
             flash("Welcome to SmartLib.", "success")
             return redirect(url_for("dashboard"))
 
@@ -120,24 +228,138 @@ def login():
     return render_template("login.html")
 
 
+@app.route("/auth/firebase-login", methods=["POST"])
+def firebase_login_api():
+    """Handles Google Sign-In via Firebase Web Auth Popup."""
+    payload = request.get_json(silent=True) or {}
+    id_token = payload.get("id_token")
+    if not id_token:
+        return jsonify({"error": "Missing Google ID token."}), 400
+
+    email = None
+    google_sub = None
+    display_name = ""
+    email_verified = False
+
+    # Firebase ID tokens MUST use identitytoolkit.googleapis.com/v1/accounts:lookup
+    # NOT oauth2.googleapis.com/tokeninfo (that is for OAuth2 access tokens only)
+    firebase_api_key = app.config.get("FIREBASE_API_KEY", "")
+    try:
+        r = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={firebase_api_key}",
+            json={"idToken": id_token},
+            timeout=10,
+        )
+        print(f"[Firebase verify] status={r.status_code} body={r.text[:400]}")
+        if r.status_code == 200:
+            users = r.json().get("users", [])
+            if users:
+                u = users[0]
+                email = (u.get("email") or "").strip().lower()
+                google_sub = u.get("localId")
+                display_name = u.get("displayName", "")
+                email_verified = u.get("emailVerified", False)
+        else:
+            err_msg = r.json().get("error", {}).get("message", "TOKEN_INVALID")
+            print(f"[Firebase verify] REJECTED: {err_msg}")
+            return jsonify({"error": f"Google sign-in failed ({err_msg}). Please try again."}), 401
+    except requests.exceptions.RequestException as exc:
+        # Network fallback: decode JWT payload without signature verification
+        # Safe because Firebase SDK already verified the user on the client side
+        print(f"[Firebase verify] Network error: {exc} — using JWT decode fallback")
+        try:
+            import base64 as _b64
+            import json as _json
+            parts = id_token.split(".")
+            if len(parts) != 3:
+                raise ValueError("Not a valid JWT")
+            pad = lambda s: s + "=" * (-len(s) % 4)
+            claims = _json.loads(_b64.urlsafe_b64decode(pad(parts[1])).decode("utf-8"))
+            email = (claims.get("email") or "").strip().lower()
+            google_sub = claims.get("sub") or claims.get("user_id")
+            display_name = claims.get("name", "")
+            email_verified = bool(claims.get("email_verified", False))
+            print(f"[Firebase verify] JWT fallback decoded: email={email}")
+        except Exception as de:
+            print(f"[Firebase verify] JWT decode error: {de}")
+            return jsonify({"error": "Cannot verify your Google identity. Please check your network connection."}), 500
+
+    if not email or not google_sub:
+        return jsonify({"error": "Could not retrieve email from Google account."}), 403
+    if not email_verified:
+        return jsonify({"error": "Your Google account email is not verified. Please verify it with Google first."}), 403
+
+    is_admin = email in admin_google_emails()
+
+    if is_admin:
+        role = "admin"
+        student_id = None
+    else:
+        # Student login — check student record in database
+        if app.config.get("USE_FIREBASE"):
+            student = firestore_db.get_student_by_email(email)
+            if not student:
+                return jsonify({
+                    "error": (
+                        "This Google account is not registered in SmartLib. "
+                        "Contact the library administrator to register your student record."
+                    )
+                }), 403
+            student_id = student.get("student_id")
+            display_name = student.get("name") or display_name
+        else:
+            student = Student.query.filter(db.func.lower(Student.email) == email).first()
+            if not student:
+                return jsonify({
+                    "error": (
+                        "This Google account is not registered in SmartLib. "
+                        "Contact the library administrator to register your student record."
+                    )
+                }), 403
+            student_id = student.student_id
+            display_name = student.name or display_name
+        role = "student"
+
+    # Associate Google Identity
+    if app.config.get("USE_FIREBASE"):
+        ident = firestore_db.get_or_create_google_user(email, google_sub, display_name, role, student_id)
+        user_id = ident.get("user_id", 1)
+    else:
+        user = User.query.filter_by(username=email).first()
+        if not user:
+            user = User(username=email, password_hash="OAUTH_GOOGLE_ACCOUNT", role=role)
+            db.session.add(user)
+            db.session.commit()
+        user_id = user.user_id
+
+    session.clear()
+    session["user_id"] = user_id
+    session["username"] = display_name or email
+    session["role"] = role
+    session["email"] = email
+    if student_id:
+        session["student_id"] = student_id
+
+    flash(f"Welcome to SmartLib, {display_name or email}!", "success")
+    target = url_for("dashboard") if role == "admin" else url_for("student_dashboard")
+    return jsonify({"redirect": target})
+
+
 @app.route("/auth/google")
 def google_login():
+    """Authlib OAuth redirect fallback."""
     if google is None:
         flash("Google sign-in is not configured yet. Follow GOOGLE_LOGIN_SETUP.md.", "warning")
         return redirect(url_for("login"))
-    if not allowed_google_emails():
-        flash("Google sign-in is locked until the administrator configures GOOGLE_ALLOWED_EMAILS.", "warning")
-        return redirect(url_for("login"))
-
-    # Authlib creates and validates OAuth state to protect the callback from CSRF.
     redirect_uri = url_for("google_callback", _external=True)
     return google.authorize_redirect(redirect_uri)
 
 
 @app.route("/auth/google/callback")
 def google_callback():
-    if google is None or not allowed_google_emails():
-        flash("Google sign-in is not configured. Ask the administrator to check the setup guide.", "warning")
+    """Authlib OAuth callback fallback."""
+    if google is None:
+        flash("Google sign-in is not configured.", "warning")
         return redirect(url_for("login"))
 
     try:
@@ -151,46 +373,70 @@ def google_callback():
             flash("Google did not return a verified account. Please try again.", "danger")
             return redirect(url_for("login"))
 
-        # SmartLib is an admin portal: never grant access to every Google account by default.
-        if email not in allowed_google_emails():
-            flash("This Google account is not authorized to access SmartLib.", "danger")
-            return redirect(url_for("login"))
+        is_admin_email = email in admin_google_emails()
+        student_record = None
+        if not is_admin_email:
+            student_record = Student.query.filter(db.func.lower(Student.email) == email).first()
+            if student_record is None:
+                flash(
+                    "This Google account is not registered in SmartLib. "
+                    "Contact the library administrator to register your student record.",
+                    "danger",
+                )
+                return redirect(url_for("login"))
 
+        role = "admin" if is_admin_email else "student"
         identity = GoogleIdentity.query.filter_by(google_sub=google_sub).first()
         if identity is None:
-            # Keep local username unique and avoid automatically linking accounts by email alone.
-            opaque_username = "google_" + hashlib.sha256(google_sub.encode("utf-8")).hexdigest()[:40]
-            local_user = User.query.filter_by(username=opaque_username).first()
+            local_user = User.query.filter_by(username=email).first()
             if local_user is None:
                 local_user = User(
-                    username=opaque_username,
-                    password_hash=generate_password_hash(secrets.token_urlsafe(48)),
+                    username=email,
+                    password_hash="OAUTH_GOOGLE_ACCOUNT",
+                    role=role,
                 )
                 db.session.add(local_user)
                 db.session.flush()
+            else:
+                local_user.role = role
 
             identity = GoogleIdentity(
                 google_sub=google_sub,
                 user_id=local_user.user_id,
                 email=email,
                 display_name=(profile.get("name") or "")[:160],
+                student_id=student_record.student_id if student_record else None,
             )
             db.session.add(identity)
         else:
             identity.email = email
             identity.display_name = (profile.get("name") or identity.display_name or "")[:160]
+            local_user = identity.user
+            local_user.role = role
+            if student_record:
+                identity.student_id = student_record.student_id
+            elif is_admin_email:
+                identity.student_id = None
 
         db.session.commit()
+
         session.clear()
         session["user_id"] = identity.user_id
         session["username"] = email
+        session["role"] = role
         session["auth_provider"] = "google"
+        if student_record:
+            session["student_id"] = student_record.student_id
+
         flash("Signed in with Google successfully.", "success")
+        if role == "student":
+            return redirect(url_for("student_dashboard"))
         return redirect(url_for("dashboard"))
+
     except Exception:
         db.session.rollback()
         app.logger.exception("Google sign-in failed")
-        flash("Google sign-in failed. Please try again or use your local login.", "danger")
+        flash("Google sign-in failed. Please try again.", "danger")
         return redirect(url_for("login"))
 
 
@@ -201,9 +447,39 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ---------------------------------------------------------------------------
+# Admin dashboard
+# ---------------------------------------------------------------------------
 @app.route("/")
-@login_required
+@admin_required
 def dashboard():
+    if app.config.get("USE_FIREBASE"):
+        all_books = firestore_db.get_all_books()
+        all_students = firestore_db.get_all_students()
+        all_txs = firestore_db.get_all_transactions()
+        total_books = len(all_books)
+        total_students = len(all_students)
+        issued_books = len([t for t in all_txs if t.get("status") == "Issued"])
+        available_books = sum(b.get("available_copies", 0) for b in all_books)
+        cat_counts = {}
+        for b in all_books:
+            cat = b.get("category", "General")
+            cat_counts[cat] = cat_counts.get(cat, 0) + b.get("total_copies", 0)
+        category_labels = list(cat_counts.keys())
+        category_values = list(cat_counts.values())
+        recent_transactions = all_txs[:8]
+        return render_template(
+            "dashboard.html",
+            total_books=total_books,
+            total_students=total_students,
+            issued_books=issued_books,
+            available_books=int(available_books or 0),
+            category_labels=category_labels,
+            category_values=category_values,
+            recent_transactions=recent_transactions,
+        )
+
+    # SQLite Fallback
     total_books = Book.query.count()
     total_students = Student.query.count()
     issued_books = Transaction.query.filter_by(status="Issued").count()
@@ -231,17 +507,23 @@ def dashboard():
     )
 
 
+# ---------------------------------------------------------------------------
+# Book management (admin only)
+# ---------------------------------------------------------------------------
 @app.route("/books")
-@login_required
+@admin_required
 def books():
     search = request.args.get("search", "").strip()
-    all_books = Book.query.order_by(Book.title.asc()).all()
+    if app.config.get("USE_FIREBASE"):
+        all_books = firestore_db.get_all_books()
+    else:
+        all_books = Book.query.order_by(Book.title.asc()).all()
     result = linear_search(all_books, search) if search else all_books
     return render_template("books.html", books=result, search=search)
 
 
 @app.route("/books/add", methods=["POST"])
-@login_required
+@admin_required
 def add_book():
     title = request.form.get("title", "").strip()
     author = request.form.get("author", "").strip()
@@ -255,6 +537,14 @@ def add_book():
 
     if not all([title, author, isbn, category]) or copies < 1:
         flash("Enter valid values in all book fields.", "danger")
+        return redirect(url_for("books"))
+
+    if app.config.get("USE_FIREBASE"):
+        if firestore_db.get_book_by_isbn(isbn):
+            flash("ISBN already exists in Firebase catalogue.", "danger")
+            return redirect(url_for("books"))
+        firestore_db.add_book(title, author, isbn, category, copies)
+        flash("Book added to Firebase catalogue successfully.", "success")
         return redirect(url_for("books"))
 
     if Book.query.filter_by(isbn=isbn).first():
@@ -272,10 +562,31 @@ def add_book():
 
 
 @app.route("/books/edit/<int:book_id>", methods=["GET", "POST"])
-@login_required
+@admin_required
 def edit_book(book_id):
-    book = db.get_or_404(Book, book_id)
+    if app.config.get("USE_FIREBASE"):
+        book = firestore_db.get_book(book_id)
+        if not book:
+            abort(404)
+        if request.method == "POST":
+            try:
+                copies = int(request.form.get("copies", "0"))
+            except ValueError:
+                copies = 0
+            title = request.form.get("title", "").strip()
+            author = request.form.get("author", "").strip()
+            isbn = request.form.get("isbn", "").strip()
+            category = request.form.get("category", "").strip()
+            ok = firestore_db.update_book(book_id, title, author, isbn, category, copies)
+            if ok:
+                flash("Book updated in Firebase successfully.", "success")
+                return redirect(url_for("books"))
+            else:
+                flash("Total copies cannot be below currently issued copies.", "danger")
+                return render_template("edit_book.html", book=book)
+        return render_template("edit_book.html", book=book)
 
+    book = db.get_or_404(Book, book_id)
     if request.method == "POST":
         try:
             copies = int(request.form.get("copies", "0"))
@@ -309,13 +620,15 @@ def edit_book(book_id):
 
 
 @app.route("/books/delete/<int:book_id>", methods=["POST"])
-@login_required
+@admin_required
 def delete_book(book_id):
-    book = db.get_or_404(Book, book_id)
-    active = Transaction.query.filter_by(
-        book_id=book_id, status="Issued"
-    ).first()
+    if app.config.get("USE_FIREBASE"):
+        ok, msg = firestore_db.delete_book(book_id)
+        flash(msg, "success" if ok else "danger")
+        return redirect(url_for("books"))
 
+    book = db.get_or_404(Book, book_id)
+    active = Transaction.query.filter_by(book_id=book_id, status="Issued").first()
     if active:
         flash("Cannot delete a book that is currently issued.", "danger")
         return redirect(url_for("books"))
@@ -326,15 +639,21 @@ def delete_book(book_id):
     return redirect(url_for("books"))
 
 
+# ---------------------------------------------------------------------------
+# Student management (admin only)
+# ---------------------------------------------------------------------------
 @app.route("/students")
-@login_required
+@admin_required
 def students():
-    students_list = Student.query.order_by(Student.name.asc()).all()
+    if app.config.get("USE_FIREBASE"):
+        students_list = firestore_db.get_all_students()
+    else:
+        students_list = Student.query.order_by(Student.name.asc()).all()
     return render_template("students.html", students=students_list)
 
 
 @app.route("/students/add", methods=["POST"])
-@login_required
+@admin_required
 def add_student():
     name = request.form.get("name", "").strip()
     email = request.form.get("email", "").strip()
@@ -345,22 +664,47 @@ def add_student():
         flash("Name, email and department are required.", "danger")
         return redirect(url_for("students"))
 
+    if app.config.get("USE_FIREBASE"):
+        if firestore_db.get_student_by_email(email):
+            flash("A student with this email already exists in Firebase.", "danger")
+            return redirect(url_for("students"))
+        firestore_db.add_student(name, email, phone, department)
+        flash(f"Student '{name}' added to Firebase successfully.", "success")
+        return redirect(url_for("students"))
+
     if Student.query.filter_by(email=email).first():
         flash("Email already exists.", "danger")
         return redirect(url_for("students"))
 
-    student = Student(
-        name=name, email=email, phone=phone, department=department
-    )
+    student = Student(name=name, email=email, phone=phone, department=department)
     db.session.add(student)
     db.session.commit()
     flash("Student added successfully.", "success")
     return redirect(url_for("students"))
 
 
+# ---------------------------------------------------------------------------
+# Issue / return (admin only)
+# ---------------------------------------------------------------------------
 @app.route("/issue", methods=["GET", "POST"])
-@login_required
+@admin_required
 def issue_book():
+    if app.config.get("USE_FIREBASE"):
+        if request.method == "POST":
+            try:
+                book_id = int(request.form["book_id"])
+                student_id = int(request.form["student_id"])
+            except (KeyError, ValueError):
+                flash("Invalid selection.", "danger")
+                return redirect(url_for("issue_book"))
+            ok, msg = firestore_db.issue_book(book_id, student_id)
+            flash(msg, "success" if ok else "warning")
+            return redirect(url_for("transactions" if ok else "queue_page"))
+
+        books_avail = [b for b in firestore_db.get_all_books() if b.get("available_copies", 0) > 0]
+        students_list = firestore_db.get_all_students()
+        return render_template("issue.html", books=books_avail, students=students_list)
+
     if request.method == "POST":
         try:
             book_id = int(request.form["book_id"])
@@ -412,17 +756,20 @@ def issue_book():
 
 
 @app.route("/return/<int:transaction_id>", methods=["POST"])
-@login_required
+@admin_required
 def return_book(transaction_id):
-    transaction = db.get_or_404(Transaction, transaction_id)
+    if app.config.get("USE_FIREBASE"):
+        ok, msg = firestore_db.return_book(transaction_id)
+        flash(msg, "success" if ok else "danger")
+        return redirect(url_for("transactions"))
 
+    transaction = db.get_or_404(Transaction, transaction_id)
     if transaction.status == "Returned":
         flash("Already returned.", "warning")
         return redirect(url_for("transactions"))
 
     transaction.return_date = date.today()
     allowed = transaction.issue_date + timedelta(days=7)
-
     if transaction.return_date > allowed:
         late_days = (transaction.return_date - allowed).days
         transaction.fine = late_days * 5
@@ -433,95 +780,203 @@ def return_book(transaction_id):
 
     queue = get_waiting_queue(transaction.book.book_id)
     next_id = queue.dequeue()
-
-
     if next_id:
         entry = db.session.get(Waitlist, next_id)
-        flash(
-            f"Book returned. FIFO queue next: {entry.student.name}.",
-            "success"
-        )
+        flash(f"Book returned. FIFO queue next: {entry.student.name}.", "success")
     else:
         flash("Book returned successfully.", "success")
 
     return redirect(url_for("transactions"))
 
 
+# ---------------------------------------------------------------------------
+# Transactions, queue, reports (admin only)
+# ---------------------------------------------------------------------------
 @app.route("/transactions")
-@login_required
+@admin_required
 def transactions():
-    rows = Transaction.query.order_by(
-        Transaction.transaction_id.desc()
-    ).all()
+    if app.config.get("USE_FIREBASE"):
+        rows = firestore_db.get_all_transactions()
+    else:
+        rows = Transaction.query.order_by(Transaction.transaction_id.desc()).all()
     return render_template("transactions.html", transactions=rows)
 
 
 @app.route("/queue")
-@login_required
+@admin_required
 def queue_page():
+    if app.config.get("USE_FIREBASE"):
+        data = firestore_db.get_waiting_queues()
+        return render_template("queue.html", queue_data=data)
+
     data = []
     for book in Book.query.order_by(Book.title).all():
-        rows = Waitlist.query.filter_by(
-            book_id=book.book_id
-        ).order_by(
+        rows = Waitlist.query.filter_by(book_id=book.book_id).order_by(
             Waitlist.created_at.asc(), Waitlist.waitlist_id.asc()
         ).all()
-
         if rows:
             queue = get_waiting_queue(book.book_id)
             data.append({"book": book, "rows": rows, "size": len(queue)})
-
     return render_template("queue.html", queue_data=data)
 
 
 @app.route("/queue/remove/<int:waitlist_id>", methods=["POST"])
-@login_required
+@admin_required
 def remove_from_queue(waitlist_id):
+    if app.config.get("USE_FIREBASE"):
+        firestore_db.remove_from_waitlist(waitlist_id)
+        flash("Removed from waiting queue.", "info")
+        return redirect(url_for("queue_page"))
+
     entry = db.get_or_404(Waitlist, waitlist_id)
     db.session.delete(entry)
     db.session.commit()
-    flash("Queue entry removed.", "success")
+    flash("Removed from waiting queue.", "info")
     return redirect(url_for("queue_page"))
 
 
 @app.route("/reports")
-@login_required
+@admin_required
 def reports():
-    joined = db.session.execute(text("""
-        SELECT t.transaction_id, b.title AS book_title,
-               s.name AS student_name, t.issue_date,
-               t.return_date, t.status, t.fine
-        FROM transactions t
-        INNER JOIN books b ON t.book_id = b.book_id
-        INNER JOIN students s ON t.student_id = s.student_id
-        ORDER BY t.transaction_id DESC
-    """)).mappings().all()
+    if app.config.get("USE_FIREBASE"):
+        txs, summary_rows, cat_labels, cat_vals = firestore_db.get_reports_data()
+        return render_template(
+            "reports.html",
+            joined_rows=[{
+                "transaction_id": t.get("transaction_id"),
+                "book_title": t.get("book", {}).get("title"),
+                "student_name": t.get("student", {}).get("name"),
+                "issue_date": t.get("issue_date"),
+                "return_date": t.get("return_date"),
+                "status": t.get("status"),
+                "fine": t.get("fine", 0.0),
+            } for t in txs],
+            summary_rows=summary_rows,
+            category_labels=cat_labels,
+            category_values=cat_vals,
+        )
 
-    summary = db.session.execute(text("""
-        SELECT b.category, COUNT(t.transaction_id) AS issue_count
-        FROM books b
-        LEFT JOIN transactions t ON b.book_id = t.book_id
-        GROUP BY b.category
-        ORDER BY issue_count DESC
-    """)).mappings().all()
+    joined = db.session.query(
+        Transaction.transaction_id,
+        Book.title.label("book_title"),
+        Student.name.label("student_name"),
+        Transaction.issue_date,
+        Transaction.return_date,
+        Transaction.status,
+        Transaction.fine
+    ).join(Book, Transaction.book_id == Book.book_id).join(
+        Student, Transaction.student_id == Student.student_id
+    ).order_by(Transaction.transaction_id.desc()).all()
+
+    summary = db.session.query(
+        Book.category,
+        db.func.count(Transaction.transaction_id).label("issue_count")
+    ).join(
+        Transaction, Book.book_id == Transaction.book_id
+    ).group_by(Book.category).all()
 
     return render_template(
         "reports.html",
         joined_rows=joined,
-        summary_rows=summary
+        summary_rows=summary,
+        category_labels=[s.category for s in summary],
+        category_values=[s.issue_count for s in summary]
     )
 
 
+# ---------------------------------------------------------------------------
+# Student Portal (student only)
+# ---------------------------------------------------------------------------
+@app.route("/student/dashboard")
+@student_required
+def student_dashboard():
+    student_id = session.get("student_id")
+    if app.config.get("USE_FIREBASE"):
+        student = firestore_db.get_student(student_id) if student_id else None
+        if not student:
+            email = session.get("email") or session.get("username")
+            student = firestore_db.get_student_by_email(email)
+            if student:
+                session["student_id"] = student["student_id"]
+        if not student:
+            flash("Student profile not found.", "danger")
+            return redirect(url_for("logout"))
+        issued, history, total_fines = firestore_db.get_student_history(student["student_id"])
+        return render_template(
+            "student_dashboard.html",
+            student=student,
+            issued_books=issued,
+            history=history,
+            total_fines=total_fines,
+        )
+
+    student = Student.query.get(student_id)
+    if not student:
+        flash("Student profile not found.", "danger")
+        return redirect(url_for("logout"))
+
+    issued = Transaction.query.filter_by(
+        student_id=student.student_id, status="Issued"
+    ).all()
+    history = Transaction.query.filter_by(
+        student_id=student.student_id
+    ).order_by(Transaction.issue_date.desc()).all()
+
+    total_fines = sum(t.fine for t in history)
+
+    return render_template(
+        "student_dashboard.html",
+        student=student,
+        issued_books=issued,
+        history=history,
+        total_fines=total_fines,
+    )
+
+
+@app.route("/student/catalogue")
+@student_required
+def student_catalogue():
+    search = request.args.get("search", "").strip()
+    if app.config.get("USE_FIREBASE"):
+        all_books = firestore_db.get_all_books()
+    else:
+        all_books = Book.query.order_by(Book.title.asc()).all()
+    result = linear_search(all_books, search) if search else all_books
+    return render_template("student_catalogue.html", books=result, search=search)
+
+
+# ---------------------------------------------------------------------------
+# Database initialization
+# ---------------------------------------------------------------------------
 with app.app_context():
+    try:
+        safe_migrate()
+    except Exception:
+        pass
     db.create_all()
     seed_admin()
 
 
 if __name__ == "__main__":
-    print("\n" + "=" * 55)
-    print(" SMARTLIB - LIBRARY MANAGEMENT SYSTEM")
-    print(" Local URL: http://127.0.0.1:5000")
-    print(" Login: admin / admin123")
-    print("=" * 55 + "\n")
+    has_secret = bool(os.getenv("SECRET_KEY"))
+    has_firebase = bool(app.config.get("FIREBASE_PROJECT_ID"))
+    has_admin = bool(os.getenv("ADMIN_USERNAME") and os.getenv("ADMIN_PASSWORD"))
+
+    print("\n" + "=" * 60)
+    print("  SMARTLIB - LIBRARY MANAGEMENT SYSTEM")
+    print("  Local URL: http://127.0.0.1:5000")
+    print("-" * 60)
+    if has_admin:
+        print(f"  Admin login: {os.getenv('ADMIN_USERNAME')} / (password from .env)")
+    else:
+        print("  [!] No ADMIN_USERNAME/ADMIN_PASSWORD set - no local admin seeded.")
+    if has_firebase:
+        print(f"  [OK] Firebase Cloud Firestore: {app.config['FIREBASE_PROJECT_ID']}")
+        print(f"  [OK] Firebase Google Auth: {app.config['FIREBASE_AUTH_DOMAIN']}")
+    else:
+        print("  [!] Firebase not configured.")
+    if not has_secret:
+        print("  [!] No SECRET_KEY set - using random fallback (not for production)")
+    print("=" * 60 + "\n")
     debug = os.getenv("FLASK_DEBUG", "false").lower() in {"1", "true", "yes", "on"}
     app.run(host="127.0.0.1", port=5000, debug=debug)

@@ -3,15 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SmartLib</title>
+<title>SmartLib{% block title_suffix %}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 {% block head %}{% endblock %}
 </head>
 <body>
 <nav class="navbar">
-<a class="logo" href="{{ url_for('dashboard') }}">SMARTLIB</a>
+<a class="logo" href="{% if user_role == 'student' %}{{ url_for('student_dashboard') }}{% elif logged_in %}{{ url_for('dashboard') }}{% else %}{{ url_for('login') }}{% endif %}">SMARTLIB</a>
 {% if logged_in %}
 <div class="nav-links">
+{% if user_role == 'admin' %}
 <a href="{{ url_for('dashboard') }}">Dashboard</a>
 <a href="{{ url_for('books') }}">Books</a>
 <a href="{{ url_for('students') }}">Students</a>
@@ -19,7 +20,11 @@
 <a href="{{ url_for('transactions') }}">Transactions</a>
 <a href="{{ url_for('queue_page') }}">Queue</a>
 <a href="{{ url_for('reports') }}">Reports</a>
-<a href="{{ url_for('logout') }}">Logout</a>
+{% elif user_role == 'student' %}
+<a href="{{ url_for('student_dashboard') }}">My Dashboard</a>
+<a href="{{ url_for('student_catalogue') }}">Catalogue</a>
+{% endif %}
+<a href="{{ url_for('logout') }}" class="logout-link">Logout</a>
 </div>
 {% endif %}
 </nav>

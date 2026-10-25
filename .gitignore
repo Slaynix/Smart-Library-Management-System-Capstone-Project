@@ -1,5 +1,33 @@
-venv/
+﻿# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
 .env
+*.key
+*.pem
+
+# Database files (SQLite — use Firebase in production)
+instance/
 *.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,14 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "auth": {
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "SmartLib",
+        "supportEmail": "sanskargirase787@gmail.com"
+      }
+    }
+  }
+}
