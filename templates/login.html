@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="auth-card">
+<div class="brand-mark">SL</div>
+<h1>SmartLib Login</h1>
+<p class="subtitle">Library administration portal</p>
+<form method="POST" class="stack-form">
+<input name="username" autocomplete="username" placeholder="Username" required>
+<input type="password" name="password" autocomplete="current-password" placeholder="Password" required>
+<button class="btn" type="submit">Sign In with Password</button>
+</form>
+<div class="auth-divider"><span>OR</span></div>
+{% if google_login_enabled %}
+<a class="btn google-btn" href="{{ url_for('google_login') }}"><span class="google-g" aria-hidden="true">G</span> Continue with Google</a>
+{% else %}
+<div class="google-unavailable">Google sign-in is not configured yet. See <strong>GOOGLE_LOGIN_SETUP.md</strong>.</div>
+{% endif %}
+<p class="hint">For safety, only Google accounts listed in the administrator's <code>GOOGLE_ALLOWED_EMAILS</code> setting can access this admin portal.</p>
+</div>
+{% endblock %}

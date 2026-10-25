@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block head %}<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>{% endblock %}
+{% block content %}
+<div class="page-header">
+<div><p class="eyebrow">SMARTLIB CONTROL CENTER</p><h1>Library Dashboard</h1><p class="subtitle">DBMS + Data Structures + Python</p></div>
+<a class="btn" href="{{ url_for('issue_book') }}">Issue a Book</a>
+</div>
+<div class="stats">
+<div class="card"><span>Total Books</span><strong>{{ total_books }}</strong></div>
+<div class="card"><span>Available Copies</span><strong>{{ available_books }}</strong></div>
+<div class="card"><span>Issued Books</span><strong>{{ issued_books }}</strong></div>
+<div class="card"><span>Students</span><strong>{{ total_students }}</strong></div>
+</div>
+<div class="grid-2">
+<section class="section"><h2>Books by Category</h2><canvas id="categoryChart"></canvas></section>
+<section class="section"><h2>Academic Concepts</h2>
+<div class="concept-list">
+<div><b>DBMS</b><span>CRUD · JOIN · FK · Aggregate</span></div>
+<div><b>DS</b><span>Stack · Queue · Search</span></div>
+<div><b>Python</b><span>Flask · OOP · Validation</span></div>
+</div></section>
+</div>
+<section class="section">
+<div class="section-title"><h2>Recent Transactions</h2><a href="{{ url_for('reports') }}">Full Report →</a></div>
+<div class="table-wrap"><table><thead><tr><th>ID</th><th>Book</th><th>Student</th><th>Status</th><th>Fine</th><th>Action</th></tr></thead>
+<tbody>
+{% for t in recent_transactions %}
+<tr><td>#{{ t.transaction_id }}</td><td>{{ t.book.title }}</td><td>{{ t.student.name }}</td><td><span class="badge">{{ t.status }}</span></td><td>₹{{ "%.2f"|format(t.fine) }}</td><td>
+{% if t.status == "Issued" %}
+<form method="POST" action="{{ url_for('return_book', transaction_id=t.transaction_id) }}"><button class="btn small">Return</button></form>
+{% else %}<span class="muted">Completed</span>{% endif %}
+</td></tr>
+{% else %}<tr><td colspan="6" class="empty">No transactions yet.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+<script>
+new Chart(document.getElementById("categoryChart"), {
+type:"doughnut",
+data:{labels:{{ category_labels|tojson }},datasets:[{data:{{ category_values|tojson }}}]},
+options:{responsive:true,plugins:{legend:{position:"bottom"}}}
+});
+</script>
+{% endblock %}

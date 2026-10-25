@@ -1,0 +1,51 @@
+SMARTLIB - LOCALHOST RUN GUIDE
+===============================
+
+OPTION 1: EASIEST (Windows)
+----------------------------
+Double-click:
+    run_smartlib.bat
+
+The script will:
+1. Create the virtual environment if needed.
+2. Install dependencies.
+3. Start Flask.
+4. Tell you the local URL.
+
+Then open:
+    http://127.0.0.1:5000
+
+Login:
+    Use the ADMIN_USERNAME and ADMIN_PASSWORD values in your local .env file.
+    On a brand-new database only, the application has a legacy demo fallback
+    account (admin / admin123); change the password before sharing or deploying.
+
+
+OPTION 2: VS CODE TERMINAL
+---------------------------
+Open this folder in VS Code.
+
+Terminal:
+    py -m venv venv
+    venv\Scripts\activate
+    pip install -r requirements.txt
+    python app.py
+
+Then open:
+    http://127.0.0.1:5000
+
+
+IMPORTANT
+---------
+Do not open app.py by double-clicking it.
+Run it from the VS Code terminal or run_smartlib.bat.
+
+The local version uses SQLite, so no MySQL/PostgreSQL installation is
+required for your college demo.
+
+The database file is created automatically when the application starts.
+
+Google sign-in setup:
+    Read GOOGLE_LOGIN_SETUP.md. Google OAuth client credentials and an explicit
+    GOOGLE_ALLOWED_EMAILS allowlist are required; Google sign-in is not enabled
+    until those settings are supplied.

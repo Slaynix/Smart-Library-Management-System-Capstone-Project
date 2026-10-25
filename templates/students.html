@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">DBMS CRUD MODULE</p><h1>Student Management</h1></div></div>
+<section class="section"><h2>Add Student</h2><form method="POST" action="{{ url_for('add_student') }}" class="form-grid">
+<input name="name" placeholder="Student name" required><input name="email" type="email" placeholder="Email" required>
+<input name="phone" placeholder="Phone"><input name="department" placeholder="Department" required><button class="btn">Add Student</button>
+</form></section>
+<section class="section"><h2>Students</h2><div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Department</th></tr></thead><tbody>
+{% for s in students %}<tr><td>#{{ s.student_id }}</td><td><b>{{ s.name }}</b></td><td>{{ s.email }}</td><td>{{ s.phone or "-" }}</td><td>{{ s.department }}</td></tr>
+{% else %}<tr><td colspan="5" class="empty">No students found.</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endblock %}

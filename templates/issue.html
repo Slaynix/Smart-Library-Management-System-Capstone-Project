@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header"><div><p class="eyebrow">TRANSACTION MODULE</p><h1>Issue Book</h1><p class="subtitle">Database transaction + validation</p></div></div>
+<section class="section narrow"><form method="POST" class="stack-form">
+<label>Book</label><select name="book_id" required>{% for b in books %}<option value="{{ b.book_id }}">{{ b.title }} — {{ b.available_copies }} available</option>{% endfor %}</select>
+<label>Student</label><select name="student_id" required>{% for s in students %}<option value="{{ s.student_id }}">{{ s.name }} — {{ s.department }}</option>{% endfor %}</select>
+<button class="btn">Issue Book</button>
+</form></section>
+{% endblock %}
