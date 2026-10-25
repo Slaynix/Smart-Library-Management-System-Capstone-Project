@@ -91,3 +91,63 @@ class Waitlist(db.Model):
     student_id = db.Column(db.Integer, db.ForeignKey("students.student_id"), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     book = db.relationship("Book", backref="waitlist_entries")
+
+
+class ReservationStatus:
+    """Controlled reservation states for FIFO queue and inventory holds."""
+    WAITING = "WAITING"
+    READY_FOR_PICKUP = "READY_FOR_PICKUP"
+    FULFILLED = "FULFILLED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+    ACTIVE_STATUSES = (WAITING, READY_FOR_PICKUP)
+    FINAL_STATUSES = (FULFILLED, CANCELLED, EXPIRED)
+
+
+class Reservation(db.Model):
+    """Persistent representation of a student's book reservation and waiting queue request.
+
+    Academic & DBMS Concepts:
+    - Primary Key: reservation_id (unique, auto-incrementing integer)
+    - Foreign Keys: book_id -> books.book_id, student_id -> students.student_id
+    - FIFO Tie-Breaker: When created_at timestamps are identical, reservation_id ASC provides deterministic ordering.
+    - Indexing: Composite index (book_id, status, created_at, reservation_id) for O(log N) FIFO dequeue/peek queries.
+    """
+    __tablename__ = "reservations"
+
+    reservation_id = db.Column(db.Integer, primary_key=True)
+    book_id = db.Column(db.Integer, db.ForeignKey("books.book_id"), nullable=False, index=True)
+    student_id = db.Column(db.Integer, db.ForeignKey("students.student_id"), nullable=False, index=True)
+    status = db.Column(db.String(30), nullable=False, default=ReservationStatus.WAITING, index=True)
+
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    pickup_deadline = db.Column(db.DateTime, nullable=True)
+    fulfilled_at = db.Column(db.DateTime, nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    book = db.relationship("Book", backref=db.backref("reservations", lazy=True, cascade="all, delete-orphan"))
+    student = db.relationship("Student", backref=db.backref("reservations", lazy=True, cascade="all, delete-orphan"))
+
+    # Table arguments / composite indexes for efficient FIFO queries
+    __table_args__ = (
+        db.Index("ix_reservations_book_status_fifo", "book_id", "status", "created_at", "reservation_id"),
+        db.Index("ix_reservations_student_status", "student_id", "status"),
+    )
+
+    def is_active(self) -> bool:
+        return self.status in ReservationStatus.ACTIVE_STATUSES
+
+    def is_ready(self) -> bool:
+        return self.status == ReservationStatus.READY_FOR_PICKUP
+
+    def is_waiting(self) -> bool:
+        return self.status == ReservationStatus.WAITING
+
+    def is_expired(self) -> bool:
+        if self.status != ReservationStatus.READY_FOR_PICKUP or not self.pickup_deadline:
+            return False
+        return datetime.utcnow() > self.pickup_deadline
+

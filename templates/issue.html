@@ -1,9 +1,96 @@
 {% extends "base.html" %}
+{% block title_suffix %} — Issue Book{% endblock %}
 {% block content %}
-<div class="page-header"><div><p class="eyebrow">TRANSACTION MODULE</p><h1>Issue Book</h1><p class="subtitle">Database transaction + validation</p></div></div>
-<section class="section narrow"><form method="POST" class="stack-form">
-<label>Book</label><select name="book_id" required>{% for b in books %}<option value="{{ b.book_id }}">{{ b.title }} — {{ b.available_copies }} available</option>{% endfor %}</select>
-<label>Student</label><select name="student_id" required>{% for s in students %}<option value="{{ s.student_id }}">{{ s.name }} — {{ s.department }}</option>{% endfor %}</select>
-<button class="btn">Issue Book</button>
-</form></section>
+<div class="page-header">
+<div>
+<p class="eyebrow">TRANSACTION MODULE</p>
+<h1>Issue Book</h1>
+<p class="subtitle">Complete book checkout or fulfill active pickup reservations</p>
+</div>
+<a class="btn secondary" href="{{ url_for('queue_page') }}">View Waiting Queue</a>
+</div>
+
+{% if ready_reservations %}
+<section class="section" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin-bottom:24px;">
+<div class="section-title">
+<div>
+<h2 style="color:#166534;margin:0 0 4px 0;font-size:18px;">✓ Ready for Pickup Reservations</h2>
+<span class="muted small">Copies held exclusively for students who reserved them</span>
+</div>
+<span class="badge" style="background:#dcfce7;color:#166534;font-weight:700;">{{ ready_reservations|length }} ready</span>
+</div>
+<div class="table-wrap" style="background:white;border-radius:6px;"><table>
+<thead><tr>
+<th>Student</th><th>Book Title</th><th>Pickup Deadline</th><th style="text-align:right;">Action</th>
+</tr></thead>
+<tbody>
+{% for r in ready_reservations %}
+<tr>
+<td>
+{% if r.student is defined %}
+<b>{{ r.student.name }}</b> <span class="muted small">({{ r.student.department }})</span>
+{% else %}
+<b>{{ r.student_name }}</b> <span class="muted small">({{ r.student_dept }})</span>
+{% endif %}
+</td>
+<td>
+{% if r.book is defined %}
+<b>{{ r.book.title }}</b>
+{% else %}
+<b>Book #{{ r.book_id }}</b>
+{% endif %}
+</td>
+<td>
+<span style="color:#166534;font-weight:600;">
+{% if r.pickup_deadline_fmt is defined %}
+{{ r.pickup_deadline_fmt }}
+{% elif r.pickup_deadline %}
+{{ r.pickup_deadline.strftime('%d %b %Y, %I:%M %p') }}
+{% else %}
+-
+{% endif %}
+</span>
+</td>
+<td style="text-align:right;">
+{% set bid = r.book_id %}
+{% set sid = r.student_id %}
+<form method="POST" action="{{ url_for('issue_book') }}" style="display:inline;">
+<input type="hidden" name="book_id" value="{{ bid }}">
+<input type="hidden" name="student_id" value="{{ sid }}">
+<button class="btn small" style="background:#16a34a;" type="submit">Issue to Student</button>
+</form>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
+{% endif %}
+
+<section class="section narrow">
+<div class="section-title">
+<h2>Issue Any Book to Student</h2>
+</div>
+<form method="POST" class="stack-form">
+<label>Book</label>
+<select name="book_id" required>
+{% for b in books %}
+<option value="{{ b.book_id }}" {% if selected_book_id == b.book_id %}selected{% endif %}>
+{{ b.title }} — {{ b.available_copies }} available on shelf
+</option>
+{% endfor %}
+</select>
+
+<label>Student</label>
+<select name="student_id" required>
+{% for s in students %}
+<option value="{{ s.student_id }}" {% if selected_student_id == s.student_id %}selected{% endif %}>
+{{ s.name }} — {{ s.department }} (ID: #{{ s.student_id }})
+</option>
+{% endfor %}
+</select>
+
+<button class="btn" style="margin-top:12px;">Issue Book</button>
+</form>
+</section>
 {% endblock %}

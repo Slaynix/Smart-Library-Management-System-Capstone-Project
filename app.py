@@ -1,7 +1,7 @@
 import hashlib
 import os
 import secrets
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 
 import requests
@@ -15,10 +15,11 @@ from sqlalchemy import text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from database import db
-from models import User, GoogleIdentity, Book, Student, Transaction, Waitlist
-from ds.queue import WaitingQueue
+from models import User, GoogleIdentity, Book, Student, Transaction, Waitlist, Reservation, ReservationStatus
+from ds.queue import WaitingQueue, PersistentBookQueue
 from ds.search import linear_search
 import firestore_db
+import reservation_service
 
 
 app = Flask(__name__)
@@ -701,9 +702,21 @@ def issue_book():
             flash(msg, "success" if ok else "warning")
             return redirect(url_for("transactions" if ok else "queue_page"))
 
-        books_avail = [b for b in firestore_db.get_all_books() if b.get("available_copies", 0) > 0]
+        books_avail = firestore_db.get_all_books()
         students_list = firestore_db.get_all_students()
-        return render_template("issue.html", books=books_avail, students=students_list)
+        ready_reservations = []
+        for g in firestore_db.get_admin_reservations_firestore():
+            ready_reservations.extend(g["ready_list"])
+        selected_book_id = request.args.get("book_id", type=int)
+        selected_student_id = request.args.get("student_id", type=int)
+        return render_template(
+            "issue.html",
+            books=books_avail,
+            students=students_list,
+            ready_reservations=ready_reservations,
+            selected_book_id=selected_book_id,
+            selected_student_id=selected_student_id,
+        )
 
     if request.method == "POST":
         try:
@@ -722,20 +735,33 @@ def issue_book():
             flash("Student already has this book.", "warning")
             return redirect(url_for("issue_book"))
 
-        if book.available_copies <= 0:
-            if not Waitlist.query.filter_by(
-                book_id=book_id, student_id=student_id
-            ).first():
-                db.session.add(Waitlist(
-                    book_id=book_id, student_id=student_id
-                ))
-                db.session.commit()
-                flash("Book unavailable. Student added to FIFO queue.", "warning")
+        # Check for active reservation
+        active_res = Reservation.query.filter(
+            Reservation.book_id == book_id,
+            Reservation.student_id == student_id,
+            Reservation.status.in_(ReservationStatus.ACTIVE_STATUSES),
+        ).first()
+
+        was_held = (active_res and active_res.status == ReservationStatus.READY_FOR_PICKUP)
+
+        if not was_held and book.available_copies <= 0:
+            if not active_res:
+                reservation_service.enqueue_reservation_sql(book_id, student_id)
+                flash(f"Book unavailable. {student.name} added to FIFO waiting queue.", "warning")
             else:
                 flash("Student is already in the queue.", "warning")
             return redirect(url_for("queue_page"))
 
-        book.available_copies -= 1
+        # Fulfill reservation if exists
+        if active_res:
+            active_res.status = ReservationStatus.FULFILLED
+            active_res.fulfilled_at = datetime.utcnow()
+            active_res.updated_at = datetime.utcnow()
+
+        # Decrement available copies only if copy wasn't already held for pickup
+        if not was_held:
+            book.available_copies -= 1
+
         db.session.add(Transaction(
             book_id=book_id,
             student_id=student_id,
@@ -745,13 +771,26 @@ def issue_book():
         ))
         db.session.commit()
 
-        flash("Book issued successfully.", "success")
+        flash(f"Book issued successfully to {student.name}.", "success")
         return redirect(url_for("dashboard"))
+
+    # GET request
+    reservation_service.expire_reservations()
+    ready_reservations = (
+        Reservation.query.filter_by(status=ReservationStatus.READY_FOR_PICKUP)
+        .order_by(Reservation.created_at.asc())
+        .all()
+    )
+    selected_book_id = request.args.get("book_id", type=int)
+    selected_student_id = request.args.get("student_id", type=int)
 
     return render_template(
         "issue.html",
         books=Book.query.order_by(Book.title).all(),
-        students=Student.query.order_by(Student.name).all()
+        students=Student.query.order_by(Student.name).all(),
+        ready_reservations=ready_reservations,
+        selected_book_id=selected_book_id,
+        selected_student_id=selected_student_id,
     )
 
 
@@ -775,14 +814,28 @@ def return_book(transaction_id):
         transaction.fine = late_days * 5
 
     transaction.status = "Returned"
+    book_id = transaction.book.book_id
     transaction.book.available_copies += 1
     db.session.commit()
 
-    queue = get_waiting_queue(transaction.book.book_id)
-    next_id = queue.dequeue()
-    if next_id:
-        entry = db.session.get(Waitlist, next_id)
-        flash(f"Book returned. FIFO queue next: {entry.student.name}.", "success")
+    # FIFO Reallocation: Allocate returned copy to the oldest eligible waiting student
+    allocated = reservation_service.allocate_available_copies(book_id)
+    if allocated > 0:
+        ready_res = (
+            Reservation.query.filter_by(
+                book_id=book_id, status=ReservationStatus.READY_FOR_PICKUP
+            )
+            .order_by(Reservation.updated_at.desc())
+            .first()
+        )
+        if ready_res and ready_res.student:
+            deadline_str = ready_res.pickup_deadline.strftime("%d %b %Y, %I:%M %p") if ready_res.pickup_deadline else "48 hours"
+            flash(
+                f"Book returned successfully. Returned copy allocated to next waiting student: {ready_res.student.name} (Hold deadline: {deadline_str}).",
+                "success"
+            )
+        else:
+            flash("Book returned successfully and allocated to the next student in FIFO queue.", "success")
     else:
         flash("Book returned successfully.", "success")
 
@@ -805,19 +858,52 @@ def transactions():
 @app.route("/queue")
 @admin_required
 def queue_page():
-    if app.config.get("USE_FIREBASE"):
-        data = firestore_db.get_waiting_queues()
-        return render_template("queue.html", queue_data=data)
+    reservation_service.expire_reservations()
+    reservation_groups = reservation_service.get_all_reservations_admin()
 
-    data = []
-    for book in Book.query.order_by(Book.title).all():
-        rows = Waitlist.query.filter_by(book_id=book.book_id).order_by(
-            Waitlist.created_at.asc(), Waitlist.waitlist_id.asc()
-        ).all()
-        if rows:
-            queue = get_waiting_queue(book.book_id)
-            data.append({"book": book, "rows": rows, "size": len(queue)})
-    return render_template("queue.html", queue_data=data)
+    # Legacy queue data
+    if app.config.get("USE_FIREBASE"):
+        legacy_data = firestore_db.get_waiting_queues()
+    else:
+        legacy_data = []
+        for book in Book.query.order_by(Book.title).all():
+            rows = Waitlist.query.filter_by(book_id=book.book_id).order_by(
+                Waitlist.created_at.asc(), Waitlist.waitlist_id.asc()
+            ).all()
+            if rows:
+                queue = get_waiting_queue(book.book_id)
+                legacy_data.append({"book": book, "rows": rows, "size": len(queue)})
+
+    return render_template(
+        "queue.html",
+        reservation_groups=reservation_groups,
+        queue_data=legacy_data,
+    )
+
+
+@app.route("/admin/reservation/cancel/<int:reservation_id>", methods=["POST"])
+@admin_required
+def admin_cancel_reservation(reservation_id):
+    ok, msg = reservation_service.cancel_reservation(reservation_id, role="admin")
+    flash(msg, "success" if ok else "warning")
+    return redirect(url_for("queue_page"))
+
+
+@app.route("/admin/reservation/issue/<int:reservation_id>", methods=["POST", "GET"])
+@admin_required
+def admin_issue_reservation(reservation_id):
+    if app.config.get("USE_FIREBASE"):
+        res = firestore_db.firestore_get("reservations", str(reservation_id))
+        if not res:
+            flash("Reservation not found.", "danger")
+            return redirect(url_for("queue_page"))
+        return redirect(url_for("issue_book", book_id=res.get("book_id"), student_id=res.get("student_id")))
+
+    res = db.session.get(Reservation, reservation_id)
+    if not res:
+        flash("Reservation not found.", "danger")
+        return redirect(url_for("queue_page"))
+    return redirect(url_for("issue_book", book_id=res.book_id, student_id=res.student_id))
 
 
 @app.route("/queue/remove/<int:waitlist_id>", methods=["POST"])
@@ -891,6 +977,8 @@ def reports():
 @student_required
 def student_dashboard():
     student_id = session.get("student_id")
+    reservation_service.expire_reservations()
+
     if app.config.get("USE_FIREBASE"):
         student = firestore_db.get_student(student_id) if student_id else None
         if not student:
@@ -898,19 +986,25 @@ def student_dashboard():
             student = firestore_db.get_student_by_email(email)
             if student:
                 session["student_id"] = student["student_id"]
+                student_id = student["student_id"]
         if not student:
             flash("Student profile not found.", "danger")
             return redirect(url_for("logout"))
+
         issued, history, total_fines = firestore_db.get_student_history(student["student_id"])
+        active_reservations, history_reservations = reservation_service.get_student_reservations_summary(student["student_id"])
+
         return render_template(
             "student_dashboard.html",
             student=student,
             issued_books=issued,
             history=history,
             total_fines=total_fines,
+            active_reservations=active_reservations,
+            history_reservations=history_reservations,
         )
 
-    student = Student.query.get(student_id)
+    student = db.session.get(Student, student_id)
     if not student:
         flash("Student profile not found.", "danger")
         return redirect(url_for("logout"))
@@ -923,6 +1017,7 @@ def student_dashboard():
     ).order_by(Transaction.issue_date.desc()).all()
 
     total_fines = sum(t.fine for t in history)
+    active_reservations, history_reservations = reservation_service.get_student_reservations_summary(student.student_id)
 
     return render_template(
         "student_dashboard.html",
@@ -930,6 +1025,8 @@ def student_dashboard():
         issued_books=issued,
         history=history,
         total_fines=total_fines,
+        active_reservations=active_reservations,
+        history_reservations=history_reservations,
     )
 
 
@@ -937,12 +1034,50 @@ def student_dashboard():
 @student_required
 def student_catalogue():
     search = request.args.get("search", "").strip()
+    student_id = session.get("student_id")
+    reservation_service.expire_reservations()
+
     if app.config.get("USE_FIREBASE"):
         all_books = firestore_db.get_all_books()
+        txs = firestore_db.firestore_list("transactions")
+        issued_book_ids = {t.get("book_id") for t in txs if t.get("student_id") == student_id and t.get("status") == "Issued"}
     else:
         all_books = Book.query.order_by(Book.title.asc()).all()
+        issued_txs = Transaction.query.filter_by(student_id=student_id, status="Issued").all() if student_id else []
+        issued_book_ids = {t.book_id for t in issued_txs}
+
     result = linear_search(all_books, search) if search else all_books
-    return render_template("student_catalogue.html", books=result, search=search)
+    annotations = reservation_service.get_catalogue_book_annotations(student_id)
+
+    return render_template(
+        "student_catalogue.html",
+        books=result,
+        search=search,
+        annotations=annotations,
+        issued_book_ids=issued_book_ids,
+    )
+
+
+@app.route("/student/reserve/<int:book_id>", methods=["POST"])
+@student_required
+def reserve_book_route(book_id):
+    student_id = session.get("student_id")
+    if not student_id:
+        flash("Student account not linked to this session.", "danger")
+        return redirect(url_for("student_catalogue"))
+
+    ok, msg, data = reservation_service.reserve_book(book_id, student_id)
+    flash(msg, "success" if ok else "warning")
+    return redirect(url_for("student_dashboard"))
+
+
+@app.route("/student/reservation/cancel/<int:reservation_id>", methods=["POST"])
+@student_required
+def cancel_student_reservation(reservation_id):
+    student_id = session.get("student_id")
+    ok, msg = reservation_service.cancel_reservation(reservation_id, student_id=student_id, role="student")
+    flash(msg, "success" if ok else "warning")
+    return redirect(url_for("student_dashboard"))
 
 
 # ---------------------------------------------------------------------------

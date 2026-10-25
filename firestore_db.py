@@ -343,21 +343,42 @@ def issue_book(book_id: int, student_id: int) -> tuple[bool, str]:
     if already:
         return False, f"This book is already issued to {student['name']}."
 
-    if book["available_copies"] <= 0:
-        # Add to waitlist
-        w_id = get_next_id("waitlist_id")
+    # Check for active reservation
+    res_list = firestore_list("reservations")
+    active_res = None
+    for r in res_list:
+        if (r.get("book_id") == book_id and r.get("student_id") == student_id
+                and r.get("status") in ("READY_FOR_PICKUP", "WAITING")):
+            active_res = r
+            break
+
+    was_held = (active_res and active_res.get("status") == "READY_FOR_PICKUP")
+
+    if not was_held and book["available_copies"] <= 0:
+        # Add to waiting queue
+        r_id = get_next_id("reservation_id")
         entry = {
-            "waitlist_id": w_id,
+            "reservation_id": r_id,
             "book_id": book_id,
             "student_id": student_id,
+            "status": "WAITING",
             "created_at": datetime.utcnow().isoformat(),
+            "pickup_deadline": None,
         }
-        firestore_set("waitlist", str(w_id), entry)
+        firestore_set("reservations", str(r_id), entry)
         return False, f"No copies available. {student['name']} added to the waiting queue."
 
-    # Decrement available copies
-    book["available_copies"] -= 1
-    firestore_set("books", str(book_id), book)
+    # Fulfill reservation if exists
+    if active_res:
+        r_id = active_res.get("reservation_id") or active_res.get("_id")
+        active_res["status"] = "FULFILLED"
+        active_res["fulfilled_at"] = datetime.utcnow().isoformat()
+        firestore_set("reservations", str(r_id), active_res)
+
+    # Decrement available copies only if copy wasn't already held for pickup
+    if not was_held:
+        book["available_copies"] = max(0, book["available_copies"] - 1)
+        firestore_set("books", str(book_id), book)
 
     # Create transaction
     t_id = get_next_id("transaction_id")
@@ -397,6 +418,10 @@ def return_book(transaction_id: int) -> tuple[bool, str]:
     if book:
         book["available_copies"] = min(book["total_copies"], book["available_copies"] + 1)
         firestore_set("books", str(book_id), book)
+        # Allocate returned copy to the oldest waiting student in FIFO order
+        allocated = allocate_available_copies_firestore(book_id)
+        if allocated > 0:
+            return True, f"Book returned successfully. Returned copy allocated to the next waiting student! Fine: ₹{fine:.2f}"
 
     return True, f"Book returned successfully. Fine: ₹{fine:.2f}"
 
@@ -428,9 +453,315 @@ def get_student_history(student_id: int) -> tuple[list, list, float]:
 
 
 # ---------------------------------------------------------------------------
-# Waiting Queue
+# Smart Reservations & FIFO Queue (Firestore Implementation)
 # ---------------------------------------------------------------------------
+def reserve_book_firestore(book_id: int, student_id: int, hold_hours: int = 48) -> tuple[bool, str, dict]:
+    book = get_book(book_id)
+    if not book:
+        return False, "Book not found.", None
+    student = get_student(student_id)
+    if not student:
+        return False, "Student record not found.", None
+
+    # Check if already issued
+    txs = firestore_list("transactions")
+    if any(t.get("book_id") == book_id and t.get("student_id") == student_id and t.get("status") == "Issued" for t in txs):
+        return False, f"You currently have a copy of '{book['title']}' issued. Please return it before reserving.", None
+
+    # Expire old holds first
+    expire_reservations_firestore(hold_hours)
+
+    # Check for existing active reservation
+    all_res = firestore_list("reservations")
+    for r in all_res:
+        if r.get("book_id") == book_id and r.get("student_id") == student_id and r.get("status") in ("WAITING", "READY_FOR_PICKUP"):
+            if r.get("status") == "READY_FOR_PICKUP":
+                return False, f"You already have a reserved copy ready for pickup!", r
+            else:
+                waiting = [x for x in all_res if x.get("book_id") == book_id and x.get("status") == "WAITING"]
+                waiting.sort(key=lambda x: (x.get("created_at", ""), int(x.get("reservation_id") or 0)))
+                pos = next((idx + 1 for idx, x in enumerate(waiting) if x.get("reservation_id") == r.get("reservation_id")), 1)
+                return False, f"You are already in the waiting queue (Position #{pos}).", r
+
+    # Check waiting queue for this book
+    waiting_for_book = [r for r in all_res if r.get("book_id") == book_id and r.get("status") == "WAITING"]
+    r_id = get_next_id("reservation_id")
+    now_iso = datetime.utcnow().isoformat()
+
+    if book.get("available_copies", 0) > 0 and len(waiting_for_book) == 0:
+        # Case A: Available and no queue -> Instant Hold
+        deadline = (datetime.utcnow() + timedelta(hours=hold_hours)).isoformat()
+        res = {
+            "reservation_id": r_id,
+            "book_id": book_id,
+            "student_id": student_id,
+            "status": "READY_FOR_PICKUP",
+            "created_at": now_iso,
+            "pickup_deadline": deadline,
+            "updated_at": now_iso,
+        }
+        book["available_copies"] = max(0, book["available_copies"] - 1)
+        firestore_set("books", str(book_id), book)
+        firestore_set("reservations", str(r_id), res)
+
+        deadline_dt = datetime.fromisoformat(deadline)
+        fmt = deadline_dt.strftime("%d %b %Y, %I:%M %p")
+        return True, f"Success! A copy of '{book['title']}' is reserved for you. Please pick it up before {fmt}.", res
+    else:
+        # Case B & C: No copy available or queue exists -> FIFO enqueue
+        res = {
+            "reservation_id": r_id,
+            "book_id": book_id,
+            "student_id": student_id,
+            "status": "WAITING",
+            "created_at": now_iso,
+            "pickup_deadline": None,
+            "updated_at": now_iso,
+        }
+        firestore_set("reservations", str(r_id), res)
+        pos = len(waiting_for_book) + 1
+        ahead = pos - 1
+        ahead_msg = f"{ahead} student{'s' if ahead > 1 else ''} ahead of you" if ahead > 0 else "You are next in line"
+        return True, f"Added to waiting queue for '{book['title']}'. Queue Position: #{pos} ({ahead_msg}).", res
+
+
+def cancel_reservation_firestore(reservation_id: int, student_id: int = None, role: str = "student") -> tuple[bool, str]:
+    res = firestore_get("reservations", str(reservation_id))
+    if not res:
+        return False, "Reservation not found."
+
+    if role == "student" and student_id and res.get("student_id") != student_id:
+        return False, "Unauthorized: You can only cancel your own reservations."
+
+    if res.get("status") not in ("WAITING", "READY_FOR_PICKUP"):
+        return False, f"Cannot cancel reservation with status '{res.get('status')}'."
+
+    was_ready = (res.get("status") == "READY_FOR_PICKUP")
+    book_id = res.get("book_id")
+
+    res["status"] = "CANCELLED"
+    res["updated_at"] = datetime.utcnow().isoformat()
+    firestore_set("reservations", str(reservation_id), res)
+
+    if was_ready:
+        book = get_book(book_id)
+        if book:
+            book["available_copies"] = min(book["total_copies"], book["available_copies"] + 1)
+            firestore_set("books", str(book_id), book)
+            allocate_available_copies_firestore(book_id)
+
+    return True, "Reservation cancelled successfully."
+
+
+def allocate_available_copies_firestore(book_id: int, hold_hours: int = 48) -> int:
+    book = get_book(book_id)
+    if not book or book.get("available_copies", 0) <= 0:
+        return 0
+
+    all_res = firestore_list("reservations")
+    waiting = [r for r in all_res if r.get("book_id") == book_id and r.get("status") == "WAITING"]
+    waiting.sort(key=lambda x: (x.get("created_at", ""), int(x.get("reservation_id") or 0)))
+
+    allocated = 0
+    for cand in waiting:
+        if book["available_copies"] <= 0:
+            break
+        cand["status"] = "READY_FOR_PICKUP"
+        cand["pickup_deadline"] = (datetime.utcnow() + timedelta(hours=hold_hours)).isoformat()
+        cand["updated_at"] = datetime.utcnow().isoformat()
+        r_id = cand.get("reservation_id") or cand.get("_id")
+        firestore_set("reservations", str(r_id), cand)
+        book["available_copies"] -= 1
+        allocated += 1
+
+    if allocated > 0:
+        firestore_set("books", str(book_id), book)
+    return allocated
+
+
+def expire_reservations_firestore(hold_hours: int = 48) -> int:
+    now_iso = datetime.utcnow().isoformat()
+    all_res = firestore_list("reservations")
+    expired_count = 0
+    books_to_reallocate = set()
+
+    for r in all_res:
+        if r.get("status") == "READY_FOR_PICKUP" and r.get("pickup_deadline"):
+            if r["pickup_deadline"] < now_iso:
+                r["status"] = "EXPIRED"
+                r["updated_at"] = now_iso
+                r_id = r.get("reservation_id") or r.get("_id")
+                firestore_set("reservations", str(r_id), r)
+                expired_count += 1
+                b_id = r.get("book_id")
+                books_to_reallocate.add(b_id)
+                book = get_book(b_id)
+                if book:
+                    book["available_copies"] = min(book["total_copies"], book["available_copies"] + 1)
+                    firestore_set("books", str(b_id), book)
+
+    for b_id in books_to_reallocate:
+        allocate_available_copies_firestore(b_id, hold_hours)
+
+    return expired_count
+
+
+def fulfill_reservation_firestore(book_id: int, student_id: int) -> dict:
+    all_res = firestore_list("reservations")
+    for r in all_res:
+        if r.get("book_id") == book_id and r.get("student_id") == student_id and r.get("status") in ("READY_FOR_PICKUP", "WAITING"):
+            r["status"] = "FULFILLED"
+            r["fulfilled_at"] = datetime.utcnow().isoformat()
+            r["updated_at"] = r["fulfilled_at"]
+            r_id = r.get("reservation_id") or r.get("_id")
+            firestore_set("reservations", str(r_id), r)
+            return r
+    return None
+
+
+def get_student_reservations_firestore(student_id: int) -> tuple[list, list]:
+    expire_reservations_firestore()
+    all_res = firestore_list("reservations")
+    books = {b.get("book_id"): b for b in get_all_books() if b.get("book_id")}
+
+    student_res = [r for r in all_res if r.get("student_id") == student_id]
+    active = []
+    history = []
+
+    for r in sorted(student_res, key=lambda x: x.get("created_at", ""), reverse=True):
+        b = books.get(r.get("book_id"), {})
+        r_id = r.get("reservation_id") or r.get("_id")
+        created_dt = datetime.fromisoformat(r["created_at"]) if r.get("created_at") else datetime.utcnow()
+        deadline_dt = datetime.fromisoformat(r["pickup_deadline"]) if r.get("pickup_deadline") else None
+
+        item = {
+            "reservation_id": int(r_id) if str(r_id).isdigit() else r_id,
+            "book_id": r.get("book_id"),
+            "book_title": b.get("title", "Unknown Book"),
+            "book_author": b.get("author", "-"),
+            "book_isbn": b.get("isbn", "-"),
+            "book_category": b.get("category", "-"),
+            "status": r.get("status"),
+            "created_at": created_dt,
+            "created_at_fmt": created_dt.strftime("%d %b %Y, %H:%M"),
+            "pickup_deadline": deadline_dt,
+            "pickup_deadline_fmt": deadline_dt.strftime("%d %b %Y, %I:%M %p") if deadline_dt else None,
+            "is_ready": r.get("status") == "READY_FOR_PICKUP",
+            "is_waiting": r.get("status") == "WAITING",
+            "queue_position": 0,
+        }
+
+        if item["is_waiting"]:
+            waiting_for_book = [x for x in all_res if x.get("book_id") == r.get("book_id") and x.get("status") == "WAITING"]
+            waiting_for_book.sort(key=lambda x: (x.get("created_at", ""), int(x.get("reservation_id") or 0)))
+            pos = next((idx + 1 for idx, x in enumerate(waiting_for_book) if (x.get("reservation_id") or x.get("_id")) == r_id), 1)
+            item["queue_position"] = pos
+            item["ahead"] = max(0, pos - 1)
+
+        if r.get("status") in ("WAITING", "READY_FOR_PICKUP"):
+            active.append(item)
+        else:
+            history.append(item)
+
+    return active, history
+
+
+def get_catalogue_annotations_firestore(student_id: int = None) -> dict:
+    expire_reservations_firestore()
+    all_res = firestore_list("reservations")
+    active = [r for r in all_res if r.get("status") in ("WAITING", "READY_FOR_PICKUP")]
+
+    annotations = {}
+    for r in active:
+        b_id = r.get("book_id")
+        if b_id not in annotations:
+            annotations[b_id] = {"waiting_count": 0, "ready_count": 0, "user_reservation": None}
+        if r.get("status") == "WAITING":
+            annotations[b_id]["waiting_count"] += 1
+        elif r.get("status") == "READY_FOR_PICKUP":
+            annotations[b_id]["ready_count"] += 1
+
+        if student_id and r.get("student_id") == student_id:
+            annotations[b_id]["user_reservation"] = {
+                "reservation_id": r.get("reservation_id") or r.get("_id"),
+                "status": r.get("status"),
+            }
+    return annotations
+
+
+def get_admin_reservations_firestore() -> list:
+    expire_reservations_firestore()
+    all_res = firestore_list("reservations")
+    active = [r for r in all_res if r.get("status") in ("WAITING", "READY_FOR_PICKUP")]
+    books = {b.get("book_id"): b for b in get_all_books() if b.get("book_id")}
+    students = {s.get("student_id"): s for s in get_all_students() if s.get("student_id")}
+
+    by_book = {}
+    for r in active:
+        b_id = r.get("book_id")
+        if b_id not in by_book:
+            by_book[b_id] = []
+        by_book[b_id].append(r)
+
+    result = []
+    for b_id, res_list in by_book.items():
+        book = books.get(b_id, {"book_id": b_id, "title": f"Book #{b_id}", "available_copies": 0})
+        res_list.sort(key=lambda x: (x.get("created_at", ""), int(x.get("reservation_id") or 0)))
+
+        ready_list = []
+        waiting_list = []
+        pos = 1
+
+        for r in res_list:
+            s = students.get(r.get("student_id"), {})
+            created_dt = datetime.fromisoformat(r["created_at"]) if r.get("created_at") else datetime.utcnow()
+            deadline_dt = datetime.fromisoformat(r["pickup_deadline"]) if r.get("pickup_deadline") else None
+
+            data = {
+                "reservation_id": r.get("reservation_id") or r.get("_id"),
+                "student_id": r.get("student_id"),
+                "student_name": s.get("name", "Unknown Student"),
+                "student_email": s.get("email", "-"),
+                "student_dept": s.get("department", "-"),
+                "status": r.get("status"),
+                "created_at": created_dt,
+                "created_at_fmt": created_dt.strftime("%d %b %Y %H:%M"),
+                "pickup_deadline": deadline_dt,
+                "pickup_deadline_fmt": deadline_dt.strftime("%d %b %Y, %I:%M %p") if deadline_dt else None,
+            }
+            if r.get("status") == "READY_FOR_PICKUP":
+                ready_list.append(data)
+            elif r.get("status") == "WAITING":
+                data["queue_position"] = pos
+                pos += 1
+                waiting_list.append(data)
+
+        result.append({
+            "book": book,
+            "ready_list": ready_list,
+            "waiting_list": waiting_list,
+            "total_active": len(res_list),
+            "waiting_count": len(waiting_list),
+            "ready_count": len(ready_list),
+        })
+
+    return result
+
+
 def get_waiting_queues() -> list:
+    """Enhanced to leverage the full reservation queue."""
+    admin_res = get_admin_reservations_firestore()
+    if admin_res:
+        return [{
+            "book": g["book"],
+            "rows": [{
+                "waitlist_id": r["reservation_id"],
+                "student": {"name": r["student_name"]},
+                "created_at": r["created_at"],
+            } for r in g["waiting_list"]],
+            "size": g["waiting_count"],
+        } for g in admin_res if g["waiting_count"] > 0]
+
     all_w = firestore_list("waitlist")
     books = {b.get("book_id"): b for b in get_all_books() if b.get("book_id")}
     students = {s.get("student_id"): s for s in get_all_students() if s.get("student_id")}
@@ -453,6 +784,7 @@ def get_waiting_queues() -> list:
         grouped[b_id]["size"] += 1
 
     return list(grouped.values())
+
 
 
 def remove_from_waitlist(waitlist_id: int) -> bool:

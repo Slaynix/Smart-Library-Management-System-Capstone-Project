@@ -10,14 +10,18 @@
 <a class="btn secondary" href="{{ url_for('student_catalogue') }}">Browse Catalogue</a>
 </div>
 
-<div class="stats" style="grid-template-columns: repeat(3, 1fr);">
+<div class="stats" style="grid-template-columns: repeat(4, 1fr);">
 <div class="card">
 <span>Email</span>
-<strong style="font-size:16px;word-break:break-all;">{{ student.email }}</strong>
+<strong style="font-size:15px;word-break:break-all;">{{ student.email }}</strong>
 </div>
 <div class="card">
 <span>Books Currently Issued</span>
 <strong>{{ issued_books|length }}</strong>
+</div>
+<div class="card">
+<span>Active Reservations</span>
+<strong>{{ active_reservations|length }}</strong>
 </div>
 <div class="card">
 <span>Total Fines</span>
@@ -25,6 +29,69 @@
 </div>
 </div>
 
+<!-- ======================================================================= -->
+<!-- SECTION: Active Book Reservations & Waiting Queue                       -->
+<!-- ======================================================================= -->
+<section class="section">
+<div class="section-title">
+<div>
+<h2>My Active Reservations</h2>
+<span class="muted">First-In, First-Out (FIFO) queue status & ready pickups</span>
+</div>
+<span class="badge" style="background:#e0e7ff;color:#3730a3;font-weight:600;">{{ active_reservations|length }} active</span>
+</div>
+
+{% if active_reservations %}
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Book Title & Details</th><th>Request Date</th><th>Reservation Status</th><th>Queue / Pickup Details</th><th style="text-align:right;">Action</th>
+</tr></thead>
+<tbody>
+{% for res in active_reservations %}
+<tr>
+<td>
+<b>{{ res.book_title }}</b>
+<div class="muted small">{{ res.book_author }} • {{ res.book_category }}</div>
+</td>
+<td>{{ res.created_at_fmt }}</td>
+<td>
+{% if res.is_ready %}
+<span class="badge" style="background:#dcfce7;color:#166534;font-weight:bold;padding:4px 8px;">✓ READY FOR PICKUP</span>
+{% elif res.is_waiting %}
+<span class="badge" style="background:#fef3c7;color:#92400e;font-weight:600;padding:4px 8px;">⏳ WAITING IN QUEUE</span>
+{% else %}
+<span class="badge">{{ res.status }}</span>
+{% endif %}
+</td>
+<td>
+{% if res.is_ready %}
+<div style="color:#166534;font-weight:600;">Held for you at counter</div>
+<div class="muted small">Deadline: <strong>{{ res.pickup_deadline_fmt }}</strong></div>
+{% elif res.is_waiting %}
+<div style="font-weight:700;color:#1e293b;font-size:14px;">Queue Position: #{{ res.queue_position }}</div>
+<div class="muted small">{{ res.ahead }} student{{ 's' if res.ahead != 1 else '' }} ahead of you in FIFO queue</div>
+{% endif %}
+</td>
+<td style="text-align:right;">
+<form method="POST" action="{{ url_for('cancel_student_reservation', reservation_id=res.reservation_id) }}" onsubmit="return confirm('Are you sure you want to cancel this reservation?{% if res.is_ready %} This will release your held copy to the next waiting student.{% endif %}');" style="display:inline;">
+<button class="btn danger small" type="submit">Cancel</button>
+</form>
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table></div>
+{% else %}
+<div class="card empty" style="text-align:center;padding:24px;">
+<p style="margin:0 0 12px 0;color:#64748b;">You have no active reservations at the moment.</p>
+<a class="btn small" href="{{ url_for('student_catalogue') }}">Browse Catalogue to Reserve</a>
+</div>
+{% endif %}
+</section>
+
+<!-- ======================================================================= -->
+<!-- SECTION: Currently Issued Books                                         -->
+<!-- ======================================================================= -->
 <section class="section">
 <div class="section-title">
 <h2>Currently Issued Books</h2>
@@ -40,7 +107,7 @@
 <td><b>{{ t.book.title }}</b></td>
 <td>{{ t.book.author }}</td>
 <td>{{ t.issue_date }}</td>
-<td><span class="badge">{{ t.status }}</span></td>
+<td><span class="badge" style="background:#e0f2fe;color:#0369a1;font-weight:600;">{{ t.status }}</span></td>
 </tr>
 {% else %}
 <tr><td colspan="4" class="empty">No books currently issued. Visit the library to borrow books!</td></tr>
@@ -49,6 +116,45 @@
 </table></div>
 </section>
 
+<!-- ======================================================================= -->
+<!-- SECTION: Reservation History (Completed, Cancelled, Expired)            -->
+<!-- ======================================================================= -->
+{% if history_reservations %}
+<section class="section">
+<div class="section-title">
+<h2>Reservation History</h2>
+<span class="muted">{{ history_reservations|length }} past request(s)</span>
+</div>
+<div class="table-wrap"><table>
+<thead><tr>
+<th>Book Title</th><th>Requested On</th><th>Status</th>
+</tr></thead>
+<tbody>
+{% for r in history_reservations %}
+<tr>
+<td><b>{{ r.book_title }}</b> <span class="muted small">({{ r.book_author }})</span></td>
+<td>{{ r.created_at_fmt }}</td>
+<td>
+{% if r.status == 'FULFILLED' %}
+<span class="badge" style="background:#dcfce7;color:#166534;">Fulfilled (Issued)</span>
+{% elif r.status == 'CANCELLED' %}
+<span class="badge" style="background:#f1f5f9;color:#64748b;">Cancelled</span>
+{% elif r.status == 'EXPIRED' %}
+<span class="badge" style="background:#fee2e2;color:#991b1b;">Expired</span>
+{% else %}
+<span class="badge">{{ r.status }}</span>
+{% endif %}
+</td>
+</tr>
+{% endfor %}
+</tbody>
+</table></div>
+</section>
+{% endif %}
+
+<!-- ======================================================================= -->
+<!-- SECTION: Borrowing History                                              -->
+<!-- ======================================================================= -->
 <section class="section">
 <div class="section-title">
 <h2>Borrowing History</h2>

@@ -126,6 +126,60 @@ This repository includes `render.yaml` and `Procfile` configured for automated z
 
 ---
 
+## 🧠 Data Structures and DBMS Concepts Used
+
+### 1. Data Structures (DSA) — Queue Abstract Data Type (ADT) & FIFO Fairness
+- **Queue ADT:** Operates on the **First-In, First-Out (FIFO)** discipline, ensuring that students who requested unavailable titles earlier are prioritized fairly over subsequent requests.
+- **Core Operations:**
+  - `enqueue_reservation()`: Appends a new request to the rear of the book's queue (`WAITING`).
+  - `peek_next_reservation()`: Inspects the oldest eligible request at the front of the queue without mutating its state.
+  - `dequeue_next_reservation()`: Transitions the front waiting request to `READY_FOR_PICKUP` and allocates an available copy.
+  - `get_queue_position()`: Dynamically calculates the student's live 1-based position relative to other active waiting requests.
+- **Why Database Persistence Over In-Memory Queues?**
+  A standard Python `collections.deque` resides exclusively in RAM within a single process. In multi-worker web servers (such as Gunicorn with 2+ workers) and containerized cloud hosts (such as Render), separate worker processes cannot share RAM queues, and application restarts or server recycling permanently erase in-memory data. By storing queue records in the persistent database with deterministic ordering:
+  ```sql
+  ORDER BY created_at ASC, reservation_id ASC
+  ```
+  queue state is 100% durable, surviving crashes, restarts, and multi-worker concurrent requests.
+- **Time Complexity Analysis (Honest Practical View):**
+  - **In-Memory LinkedList / Deque:** $O(1)$ for enqueue, dequeue, and peek.
+  - **Database-Backed Persistent Queue:**
+    - **Enqueue (INSERT):** $O(\log N)$ due to B-Tree index updates on the `reservations` table.
+    - **Peek / Dequeue (SELECT LIMIT 1):** $O(\log N)$ index seek via the composite index `ix_reservations_book_status_fifo` on `(book_id, status, created_at, reservation_id)`.
+    - **Queue Position (COUNT):** $O(\log N + K)$ index range scan where $K$ is the number of preceding waiting requests.
+
+---
+
+### 2. Database Management System (DBMS) Concepts
+- **Relational Integrity & Foreign Keys:**
+  - `reservation_id` (Primary Key, Auto-increment Integer).
+  - `book_id` $\rightarrow$ `books.book_id` (Foreign Key with cascading integrity).
+  - `student_id` $\rightarrow$ `students.student_id` (Foreign Key linking reservations to authorized student profiles).
+- **Composite Indexing for FIFO Performance:**
+  ```python
+  db.Index("ix_reservations_book_status_fifo", "book_id", "status", "created_at", "reservation_id")
+  ```
+  Enables the database engine to locate the next eligible waiting student using an index-only seek without performing expensive full-table scans ($O(N)$).
+- **Transactional Consistency & Inventory Accounting:**
+  - When an available copy is reserved (`READY_FOR_PICKUP`), `book.available_copies` is immediately decremented to prevent double-booking.
+  - When the administrator subsequently completes the issue transaction, the reservation transitions to `FULFILLED` **without** decrementing inventory a second time.
+  - When a book is returned, the returned copy is immediately reallocated to the oldest eligible waiting student in FIFO order.
+- **Concurrency & Duplicate Prevention:**
+  - Prevents a student from creating multiple active reservations for the same title.
+  - Prevents reserving titles the student currently has checked out.
+
+---
+
+### 3. Software Engineering & Python Architecture
+- **Service Layer Pattern (`reservation_service.py`):** Separates core business logic and Queue ADT algorithms from HTTP routes and template rendering.
+- **Controlled Finite State Machine (FSM):**
+  $$\text{WAITING} \longrightarrow \text{READY\_FOR\_PICKUP} \longrightarrow \text{FULFILLED}$$
+  $$\text{WAITING / READY\_FOR\_PICKUP} \longrightarrow \text{CANCELLED / EXPIRED}$$
+- **Role-Based Authorization:** Server-side decorators (`@student_required`, `@admin_required`) prevent privilege escalation and verify ownership before cancellation.
+- **Automated Testing:** 59 automated test cases covering end-to-end FIFO fairness, cancellation, return allocation, expiry release, and inventory consistency.
+
+---
+
 ## 🛡️ Security Best Practices
 
 - `.env` and sensitive credentials are excluded from version control via `.gitignore`.

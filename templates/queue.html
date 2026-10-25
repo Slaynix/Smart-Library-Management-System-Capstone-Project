@@ -1,9 +1,136 @@
 {% extends "base.html" %}
+{% block title_suffix %} — Book Reservations & Waiting Queue{% endblock %}
 {% block content %}
-<div class="page-header"><div><p class="eyebrow">DATA STRUCTURE</p><h1>Waiting Queue</h1><p class="subtitle">FIFO queue for unavailable books</p></div><span class="badge">FIFO</span></div>
-{% for item in queue_data %}
-<section class="section"><div class="section-title"><div><h2>{{ item.book.title }}</h2><span class="muted">{{ item.size }} waiting</span></div></div>
-<div class="queue-list">{% for row in item.rows %}<div class="queue-row"><div class="queue-number">{{ loop.index }}</div><div><b>{{ row.student.name }}</b><span class="muted">{{ row.created_at.strftime('%d %b %Y %H:%M') }}</span></div>
-<form method="POST" action="{{ url_for('remove_from_queue', waitlist_id=row.waitlist_id) }}"><button class="btn danger small">Remove</button></form></div>{% endfor %}</div></section>
-{% else %}<section class="section empty">No waiting students.</section>{% endfor %}
+<div class="page-header">
+<div>
+<p class="eyebrow">DATA STRUCTURE & CIRCULATION</p>
+<h1>Book Reservations & FIFO Waiting Queue</h1>
+<p class="subtitle">Real-time persistent Queue ADT management and held copy circulation</p>
+</div>
+<span class="badge" style="background:#e0e7ff;color:#3730a3;font-weight:700;font-size:13px;padding:6px 12px;">FIFO ADT</span>
+</div>
+
+{% set total_waiting = 0 %}
+{% set total_ready = 0 %}
+{% if reservation_groups %}
+  {% for g in reservation_groups %}
+    {% set total_waiting = total_waiting + g.waiting_count %}
+    {% set total_ready = total_ready + g.ready_count %}
+  {% endfor %}
+{% endif %}
+
+<div class="stats" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 24px;">
+<div class="card">
+<span>Books with Active Reservations</span>
+<strong>{{ reservation_groups|length if reservation_groups else (queue_data|length) }}</strong>
+</div>
+<div class="card">
+<span>Students Waiting in FIFO Queue</span>
+<strong style="color:#d97706;">{{ total_waiting if reservation_groups else 0 }}</strong>
+</div>
+<div class="card">
+<span>Held Copies Ready for Pickup</span>
+<strong style="color:#16a34a;">{{ total_ready if reservation_groups else 0 }}</strong>
+</div>
+</div>
+
+{% if reservation_groups %}
+  {% for g in reservation_groups %}
+  <section class="section" style="margin-bottom:28px;">
+  <div class="section-title">
+    <div>
+      <h2 style="margin:0 0 4px 0;">{{ g.book.title }}</h2>
+      <span class="muted small">{{ g.book.author }} • Category: {{ g.book.category }} • {{ g.book.available_copies }} on shelf</span>
+    </div>
+    <div>
+      {% if g.ready_count > 0 %}
+      <span class="badge" style="background:#dcfce7;color:#166534;font-weight:600;margin-right:6px;">{{ g.ready_count }} Ready for Pickup</span>
+      {% endif %}
+      {% if g.waiting_count > 0 %}
+      <span class="badge" style="background:#fef3c7;color:#92400e;font-weight:600;">{{ g.waiting_count }} Waiting in Queue</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- A. Ready for Pickup Section -->
+  {% if g.ready_list %}
+  <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin-bottom:16px;">
+    <h3 style="color:#166534;margin:0 0 12px 0;font-size:15px;display:flex;align-items:center;gap:8px;">
+      <span>✓</span> Ready for Pickup (Held Copies)
+    </h3>
+    <div class="table-wrap" style="background:white;border-radius:6px;"><table>
+    <thead><tr>
+      <th>Student</th><th>Email & Department</th><th>Pickup Deadline</th><th style="text-align:right;">Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for r in g.ready_list %}
+    <tr>
+      <td><b>{{ r.student_name }}</b></td>
+      <td>{{ r.student_email }} <span class="muted">({{ r.student_dept }})</span></td>
+      <td>
+        <strong style="color:#166534;">{{ r.pickup_deadline_fmt }}</strong>
+      </td>
+      <td style="text-align:right;">
+        <a class="btn small" style="background:#16a34a;margin-right:6px;" href="{{ url_for('issue_book', book_id=g.book.book_id, student_id=r.student_id) }}">Issue Book</a>
+        <form method="POST" action="{{ url_for('admin_cancel_reservation', reservation_id=r.reservation_id) }}" style="display:inline;" onsubmit="return confirm('Cancel this ready reservation? This will reallocate the copy to the next waiting student.');">
+          <button class="btn danger small" type="submit">Cancel Hold</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+    </table></div>
+  </div>
+  {% endif %}
+
+  <!-- B. Waiting FIFO Queue Section -->
+  {% if g.waiting_list %}
+  <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px;">
+    <h3 style="color:#92400e;margin:0 0 12px 0;font-size:15px;display:flex;align-items:center;gap:8px;">
+      <span>⏳</span> FIFO Waiting Queue (Next Eligible at Top)
+    </h3>
+    <div class="table-wrap" style="background:white;border-radius:6px;"><table>
+    <thead><tr>
+      <th style="width:70px;">Pos</th><th>Student Name</th><th>Email & Dept</th><th>Requested On</th><th style="text-align:right;">Action</th>
+    </tr></thead>
+    <tbody>
+    {% for r in g.waiting_list %}
+    <tr>
+      <td>
+        {% if r.queue_position == 1 %}
+        <span class="badge" style="background:#fef3c7;color:#92400e;font-weight:700;">#1 Next</span>
+        {% else %}
+        <span class="badge">#{{ r.queue_position }}</span>
+        {% endif %}
+      </td>
+      <td><b>{{ r.student_name }}</b></td>
+      <td>{{ r.student_email }} <span class="muted">({{ r.student_dept }})</span></td>
+      <td>{{ r.created_at_fmt }}</td>
+      <td style="text-align:right;">
+        <form method="POST" action="{{ url_for('admin_cancel_reservation', reservation_id=r.reservation_id) }}" style="display:inline;" onsubmit="return confirm('Remove student from waiting queue?');">
+          <button class="btn danger small" type="submit">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+    </table></div>
+  </div>
+  {% endif %}
+  </section>
+  {% endfor %}
+{% elif queue_data %}
+  <!-- Legacy Queue Fallback -->
+  {% for item in queue_data %}
+  <section class="section"><div class="section-title"><div><h2>{{ item.book.title }}</h2><span class="muted">{{ item.size }} waiting</span></div></div>
+  <div class="queue-list">{% for row in item.rows %}<div class="queue-row"><div class="queue-number">{{ loop.index }}</div><div><b>{{ row.student.name }}</b><span class="muted">Joined queue</span></div>
+  <form method="POST" action="{{ url_for('remove_from_queue', waitlist_id=row.waitlist_id) }}"><button class="btn danger small">Remove</button></form></div>{% endfor %}</div></section>
+  {% endfor %}
+{% else %}
+  <section class="section empty" style="text-align:center;padding:36px;">
+    <h3>No Active Book Reservations</h3>
+    <p class="muted">All books have zero students waiting and zero held pickup reservations.</p>
+  </section>
+{% endif %}
+
 {% endblock %}

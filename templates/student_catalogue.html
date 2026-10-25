@@ -5,14 +5,14 @@
 <div>
 <p class="eyebrow">STUDENT PORTAL</p>
 <h1>Book Catalogue</h1>
-<p class="subtitle">Browse all available books in the library</p>
+<p class="subtitle">Search, reserve available copies, or join FIFO waiting queues</p>
 </div>
 <a class="btn secondary" href="{{ url_for('student_dashboard') }}">← My Dashboard</a>
 </div>
 
 <section class="section">
 <form method="GET" class="toolbar">
-<input name="search" value="{{ search }}" placeholder="Search by title, author or ISBN">
+<input name="search" value="{{ search }}" placeholder="Search by title, author, category or ISBN">
 <button class="btn">Search</button>
 <a class="btn secondary" href="{{ url_for('student_catalogue') }}">Reset</a>
 </form>
@@ -20,30 +20,69 @@
 
 <section class="section">
 <div class="section-title">
-<h2>Books</h2>
+<h2>Library Books</h2>
 <span class="muted">{{ books|length }} result(s)</span>
 </div>
 <div class="table-wrap"><table>
 <thead><tr>
-<th>Title</th><th>Author</th><th>ISBN</th><th>Category</th><th>Available</th>
+<th>Title & Details</th><th>Category</th><th>Inventory</th><th>Queue Status</th><th style="text-align:right;">Action</th>
 </tr></thead>
 <tbody>
 {% for book in books %}
+{% set b_id = book.book_id %}
+{% set ann = annotations.get(b_id, {}) %}
+{% set waiting = ann.get('waiting_count', 0) %}
+{% set ready = ann.get('ready_count', 0) %}
+{% set user_res = ann.get('user_reservation') %}
+{% set is_borrowed = (b_id in issued_book_ids) %}
 <tr>
-<td><b>{{ book.title }}</b></td>
-<td>{{ book.author }}</td>
-<td>{{ book.isbn }}</td>
-<td>{{ book.category }}</td>
+<td>
+<b>{{ book.title }}</b>
+<div class="muted small">{{ book.author }} • ISBN: {{ book.isbn }}</div>
+</td>
+<td><span class="badge">{{ book.category }}</span></td>
 <td>
 {% if book.available_copies > 0 %}
-<span class="badge">{{ book.available_copies }} available</span>
+<span class="badge" style="background:#dcfce7;color:#166534;font-weight:600;">{{ book.available_copies }} of {{ book.total_copies }} available</span>
 {% else %}
-<span class="badge" style="background:#fee2e2;color:#991b1b;">Unavailable</span>
+<span class="badge" style="background:#fee2e2;color:#991b1b;">0 of {{ book.total_copies }} available</span>
+{% endif %}
+</td>
+<td>
+{% if waiting > 0 %}
+<span class="badge" style="background:#fef3c7;color:#92400e;">{{ waiting }} student{{ 's' if waiting > 1 else '' }} waiting (FIFO)</span>
+{% elif ready > 0 %}
+<span class="badge" style="background:#e0e7ff;color:#3730a3;">{{ ready }} copy held for pickup</span>
+{% else %}
+<span class="muted small">No queue</span>
+{% endif %}
+</td>
+<td style="text-align:right;">
+{% if is_borrowed %}
+<span class="badge" style="background:#f1f5f9;color:#475569;">Currently Borrowed</span>
+{% elif user_res %}
+  {% if user_res.status == 'READY_FOR_PICKUP' %}
+  <span class="badge" style="background:#dcfce7;color:#166534;font-weight:bold;">Ready for Pickup!</span>
+  <a class="btn small" style="margin-left:6px;" href="{{ url_for('student_dashboard') }}">View</a>
+  {% else %}
+  <span class="badge" style="background:#fef3c7;color:#92400e;">In Queue (#{{ user_res.queue_position }})</span>
+  <a class="btn small secondary" style="margin-left:6px;" href="{{ url_for('student_dashboard') }}">View</a>
+  {% endif %}
+{% else %}
+  {% if book.available_copies > 0 and waiting == 0 %}
+  <form method="POST" action="{{ url_for('reserve_book_route', book_id=b_id) }}" style="display:inline;">
+    <button class="btn small" type="submit" title="Reserve this available copy for pickup">Reserve Copy</button>
+  </form>
+  {% else %}
+  <form method="POST" action="{{ url_for('reserve_book_route', book_id=b_id) }}" style="display:inline;">
+    <button class="btn small secondary" type="submit" title="Join the First-In, First-Out waiting queue">Join Waiting Queue</button>
+  </form>
+  {% endif %}
 {% endif %}
 </td>
 </tr>
 {% else %}
-<tr><td colspan="5" class="empty">No books found.</td></tr>
+<tr><td colspan="5" class="empty">No books found matching your query.</td></tr>
 {% endfor %}
 </tbody>
 </table></div>
